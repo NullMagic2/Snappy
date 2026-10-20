@@ -36,6 +36,22 @@ impl Preset {
         }
     }
 
+    /// Recorded frame size for a native capture area. Compressed presets are scaled
+    /// while recording, so the file never exceeds the preset height: the aspect
+    /// ratio is kept, nothing is upscaled and both dimensions are rounded to the
+    /// nearest even number because H.264 4:2:0 needs even sizes. Full quality
+    /// keeps the native size untouched.
+    pub fn output_size(self, width: i32, height: i32) -> (i32, i32) {
+        let (_, _, limit) = self.encoding();
+        if self == Self::Lossless || width < 2 || height < 2 {
+            return (width, height);
+        }
+        let target_height = height.min(limit as i32);
+        let target_width =
+            (f64::from(width) * f64::from(target_height) / f64::from(height)).round() as i32;
+        (even(target_width), even(target_height))
+    }
+
     /// Size estimate for a recording of the given native size at frame_rate frames per second.
     pub fn estimate(
         self,
@@ -74,6 +90,11 @@ impl Preset {
     }
 }
 
+/// Nearest even size of at least 2 pixels.
+fn even(value: i32) -> i32 {
+    ((value + 1) / 2 * 2).max(2)
+}
+
 pub fn size(bytes: f64) -> String {
     if bytes >= 1_000_000_000.0 {
         format!("{:.2} GB", bytes / 1_000_000_000.0)
@@ -103,5 +124,16 @@ mod tests {
         let lossless_30 = Preset::Lossless.estimate(60.0, false, 1920, 1080, 30);
         assert_ne!(lossless_60, lossless_30);
         assert_eq!(Preset::Lossless.extension(), "mkv");
+    }
+
+    #[test]
+    fn output_size_limits_height_without_upscaling_and_keeps_sizes_even() {
+        assert_eq!(Preset::High.output_size(3840, 2160), (1920, 1080));
+        assert_eq!(Preset::Discord.output_size(3840, 2160), (1280, 720));
+        // A 21:9 selection keeps its aspect ratio and lands on an even width.
+        assert_eq!(Preset::Small.output_size(2560, 1080), (1138, 480));
+        // Smaller captures are not enlarged; odd sizes are rounded to even.
+        assert_eq!(Preset::High.output_size(701, 401), (702, 402));
+        assert_eq!(Preset::Lossless.output_size(701, 401), (701, 401));
     }
 }

@@ -5,7 +5,7 @@
 set -euo pipefail
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 cd -- "$project_root"
-release=14
+release=19
 case "${1:-all}" in
     all) targets='ubuntu mint debian' ;;
     ubuntu|mint|debian) targets=$1 ;;
@@ -78,7 +78,7 @@ Architecture: amd64
 Maintainer: Snappy maintainers <snappy@localhost>
 Installed-Size: $installed_size
 Depends: libc6 (>= $glibc_required), libgcc-s1, libgtk-3-0t64 (>= 3.22), libgdk-pixbuf-2.0-0, libatk1.0-0t64, libcairo2, libglib2.0-0t64, libx11-6, ffmpeg, yaru-theme-gtk, dconf-gsettings-backend, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav, xdg-desktop-portal
-Recommends: $portals, pipewire-pulse | pulseaudio
+Recommends: $portals, pipewire-pulse | pulseaudio, gstreamer1.0-plugins-bad, va-driver-all | mesa-va-drivers
 Description: Snappy screenshot and desktop video capture
  A GTK 3 screen capture tool with on-screen area selection, desktop audio,
  screenshot formats and video export presets. Supports X11 and Wayland.

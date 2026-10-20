@@ -45,20 +45,46 @@ export default class SnappyIntegration extends Extension {
                 return false;
             return original.call(this, actor, ...args);
         });
-        // Wayland clients cannot ask to stay above other windows; keep the small
-        // recording bar above them here, identified by application and title.
+        // Wayland clients cannot ask to stay above other windows, and even an "above"
+        // window sits below a focused fullscreen one (a game, a video). The recording
+        // bar is therefore lifted into the group above every window layer, and
+        // fullscreen unredirection stays off while it exists so it is always composited.
+        // Identity and title can arrive after window-created, so they are checked
+        // again whenever they change and when the window is first shown.
+        this._lifted = new Set();
         this._windowCreated = global.display.connect('window-created', (_display, window) => {
-            const snappy = window.get_gtk_application_id() === APP_ID ||
-                window.get_wm_class() === APP_ID;
-            if (!snappy)
-                return;
-            const raise = () => {
-                if (this._enabled && window.get_title() === 'Snappy recording' && !window.is_above())
-                    window.make_above();
+            let lifted = false;
+            const lift = () => {
+                if (!this._enabled || lifted)
+                    return;
+                const snappy = window.get_gtk_application_id() === APP_ID ||
+                    window.get_wm_class() === APP_ID;
+                if (!snappy || window.get_title() !== 'Snappy recording')
+                    return;
+                const actor = window.get_compositor_private();
+                if (!actor)
+                    return;
+                lifted = true;
+                window.make_above();
+                actor.get_parent()?.remove_child(actor);
+                global.top_window_group.add_child(actor);
+                global.compositor.disable_unredirect();
+                this._lifted.add(actor);
             };
-            raise();
-            const titleSignal = window.connect('notify::title', raise);
-            window.connect('unmanaged', () => window.disconnect(titleSignal));
+            const signals = ['shown', 'notify::title', 'notify::wm-class', 'notify::gtk-application-id']
+                .map(name => window.connect(name, lift));
+            window.connect('unmanaged', () => {
+                for (const id of signals)
+                    window.disconnect(id);
+                if (!lifted)
+                    return;
+                const actor = window.get_compositor_private();
+                if (actor)
+                    this._lifted.delete(actor);
+                if (this._enabled)
+                    global.compositor.enable_unredirect();
+            });
+            lift();
         });
         this._lockdown = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
         this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
@@ -77,6 +103,12 @@ export default class SnappyIntegration extends Extension {
         this._sessionModeSignal = 0;
         if (this._windowCreated) global.display.disconnect(this._windowCreated);
         this._windowCreated = 0;
+        for (const actor of this._lifted ?? []) {
+            actor.get_parent()?.remove_child(actor);
+            global.window_group.add_child(actor);
+            global.compositor.enable_unredirect();
+        }
+        this._lifted = null;
         for (const path of this._sessions.keys())
             this._stop(path);
         this._object?.unexport();

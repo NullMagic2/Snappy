@@ -32,7 +32,7 @@ enum Job {
         single_monitor: bool,
     },
     Started(Result<Recording>),
-    Finished(Result<PathBuf>),
+    Finished(Result<capture::Saved>),
 }
 
 pub struct Controller {
@@ -349,9 +349,9 @@ impl Controller {
                 }
                 self.busy.set(false);
                 match result {
-                    Ok(path) => {
-                        let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
-                        self.saved(path, bytes);
+                    Ok(saved) => {
+                        let bytes = saved.path.metadata().map(|m| m.len()).unwrap_or(0);
+                        self.saved(saved.path, bytes, saved.frames);
                     }
                     Err(error) => {
                         self.quit_after.set(false);
@@ -479,7 +479,7 @@ impl Controller {
                         if let Err(error) = state.preferences.borrow_mut().remember_image(&path) {
                             state.error(error);
                         }
-                        state.saved(path, size as u64);
+                        state.saved(path, size as u64, capture::FrameStatistics::default());
                     }
                     Ok(None) => (),
                     Err(error) => state.error(error),
@@ -634,11 +634,11 @@ impl Controller {
         }
     }
 
-    fn saved(self: &Rc<Self>, path: PathBuf, bytes: u64) {
+    fn saved(self: &Rc<Self>, path: PathBuf, bytes: u64, frames: capture::FrameStatistics) {
         let state = self.clone();
         // Confirmation must not hold the worker-event source inside its modal loop.
         glib::idle_add_local_once(move || {
-            show_saved(&state.owner, &path, bytes);
+            show_saved(&state.owner, &path, bytes, frames);
             if state.quit_after.get() {
                 if let Some(app) = state.owner.application() {
                     app.quit();
@@ -769,7 +769,14 @@ fn settings_row(
     dialog.content_area().pack_start(&row, false, false, 0);
 }
 
-fn show_saved(parent: &gtk::ApplicationWindow, path: &Path, bytes: u64) {
+/// Confirms the saved path and size. Frames the recorder could not capture are named
+/// only when there are any, so a complete recording shows nothing unusual.
+fn show_saved(
+    parent: &gtk::ApplicationWindow,
+    path: &Path,
+    bytes: u64,
+    frames: capture::FrameStatistics,
+) {
     let dialog = gtk::Dialog::with_buttons(
         Some(tr("Capture saved")),
         Some(parent),
@@ -795,6 +802,17 @@ fn show_saved(parent: &gtk::ApplicationWindow, path: &Path, bytes: u64) {
         .content_area()
         .pack_start(&capture_path, false, false, 0);
     dialog.content_area().pack_start(&size, false, false, 0);
+    if frames.dropped > 0 {
+        let dropped = gtk::Label::new(Some(&format!(
+            "{}: {} {} {}",
+            tr("Dropped frames"),
+            frames.dropped,
+            tr("of"),
+            frames.expected
+        )));
+        dropped.set_xalign(0.0);
+        dialog.content_area().pack_start(&dropped, false, false, 0);
+    }
     dialog.show_all();
     dialog.run();
     dismiss_dialog(&dialog);

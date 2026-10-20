@@ -140,6 +140,14 @@ pub fn tr(key: &str) -> &str {
             "Captura salva",
             "Captura guardada",
         ],
+        "Dropped frames" => [
+            "Dropped frames",
+            "Fotogramas perdidos",
+            "Χαμένα καρέ",
+            "Quadros perdidos",
+            "Fotogramas perdidos",
+        ],
+        "of" => ["of", "de", "από", "de", "de"],
         "Save screenshot" => [
             "Save screenshot",
             "Guardar captura",
