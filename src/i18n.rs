@@ -195,12 +195,19 @@ pub fn tr(key: &str) -> &str {
         ],
         "for" => ["for", "para", "για", "para", "para"],
         "Up to" => ["Up to", "Hasta", "Έως", "Até", "Até"],
-        "Native resolution · 30 fps · lossless" => [
-            "Native resolution · 30 fps · lossless",
-            "Resolución original · 30 fps · sin pérdida",
-            "Αρχική ανάλυση · 30 fps · χωρίς απώλειες",
-            "Resolução nativa · 30 fps · sem perdas",
-            "Resolução nativa · 30 fps · sem perdas",
+        "Native resolution · source frame rate · lossless" => [
+            "Native resolution · source frame rate · lossless",
+            "Resolución original · frecuencia de la fuente · sin pérdida",
+            "Αρχική ανάλυση · ρυθμός καρέ πηγής · χωρίς απώλειες",
+            "Resolução nativa · taxa de quadros original · sem perdas",
+            "Resolução nativa · taxa de fotogramas original · sem perdas",
+        ],
+        "source frame rate" => [
+            "source frame rate",
+            "frecuencia de la fuente",
+            "ρυθμός καρέ πηγής",
+            "taxa de quadros original",
+            "taxa de fotogramas original",
         ],
         "Discord-friendly · MP4 · balanced" => [
             "Discord-friendly · MP4 · balanced",

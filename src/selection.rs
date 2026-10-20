@@ -70,17 +70,29 @@ pub fn choose(
     overlay.add(&canvas);
     window.content_area().pack_start(&overlay, true, true, 0);
 
-    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    bar.style_context().add_class("osd");
+    bar.style_context().add_class("snappy-toolbar");
+    let provider = gtk::CssProvider::new();
+    let _ = provider.load_from_data(b".snappy-toolbar { padding: 12px; border-radius: 16px; background-color: rgba(35,35,35,0.97); color: white; }");
+    bar.style_context()
+        .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    // An input-only event box lets the bar be dragged by its padding and gaps while
+    // the controls inside keep their own clicks.
+    let toolbar = gtk::EventBox::new();
+    toolbar.set_visible_window(false);
+    toolbar.add(&bar);
     toolbar.set_halign(gtk::Align::Center);
     toolbar.set_valign(gtk::Align::End);
     toolbar.set_margin_bottom(32);
-    toolbar.style_context().add_class("osd");
-    toolbar.style_context().add_class("snappy-toolbar");
-    let provider = gtk::CssProvider::new();
-    let _ = provider.load_from_data(b".snappy-toolbar { padding: 12px; border-radius: 16px; background-color: rgba(35,35,35,0.97); color: white; }");
-    toolbar
-        .style_context()
-        .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    toolbar.add_events(
+        gdk::EventMask::BUTTON_PRESS_MASK
+            | gdk::EventMask::BUTTON_RELEASE_MASK
+            | gdk::EventMask::POINTER_MOTION_MASK,
+    );
+    // A position chosen by dragging replaces the automatic bottom/top placement.
+    let manual_position: Rc<Cell<Option<(i32, i32)>>> = Rc::new(Cell::new(None));
+    let toolbar_drag: Rc<Cell<Option<(f64, f64, i32, i32)>>> = Rc::new(Cell::new(None));
     let modes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     modes.style_context().add_class("linked");
     let photo = gtk::RadioButton::with_label(tr("Screenshot"));
@@ -141,9 +153,51 @@ pub fn choose(
         languages.upcast_ref(),
         accept.upcast_ref(),
     ] {
-        toolbar.pack_start(widget, false, false, 0);
+        bar.pack_start(widget, false, false, 0);
     }
     overlay.add_overlay(&toolbar);
+    let drag_state = toolbar_drag.clone();
+    let drag_parent = overlay.clone();
+    toolbar.connect_button_press_event(move |toolbar, event| {
+        if event.button() != 1 {
+            return glib::Propagation::Proceed;
+        }
+        let (x, y) = toolbar
+            .translate_coordinates(&drag_parent, 0, 0)
+            .unwrap_or((0, 0));
+        let (root_x, root_y) = event.root();
+        drag_state.set(Some((root_x, root_y, x, y)));
+        glib::Propagation::Stop
+    });
+    let drag_state = toolbar_drag.clone();
+    let drag_parent = overlay.clone();
+    let dragged_position = manual_position.clone();
+    toolbar.connect_motion_notify_event(move |toolbar, event| {
+        let Some((start_root_x, start_root_y, start_x, start_y)) = drag_state.get() else {
+            return glib::Propagation::Proceed;
+        };
+        let (root_x, root_y) = event.root();
+        let position = (
+            (start_x + (root_x - start_root_x).round() as i32).clamp(
+                0,
+                (drag_parent.allocated_width() - toolbar.allocated_width()).max(0),
+            ),
+            (start_y + (root_y - start_root_y).round() as i32).clamp(
+                0,
+                (drag_parent.allocated_height() - toolbar.allocated_height()).max(0),
+            ),
+        );
+        dragged_position.set(Some(position));
+        place_toolbar_at(toolbar, position);
+        glib::Propagation::Stop
+    });
+    let drag_state = toolbar_drag.clone();
+    toolbar.connect_button_release_event(move |_, event| {
+        if event.button() == 1 {
+            drag_state.set(None);
+        }
+        glib::Propagation::Stop
+    });
     let capture_button = accept.clone();
     movie.connect_toggled(move |movie| {
         capture_button.set_label(if movie.is_active() {
@@ -322,6 +376,7 @@ pub fn choose(
     let capture_button = accept.clone();
     let area_mode = region.clone();
     let drag_toolbar = toolbar.clone();
+    let dragged_position = manual_position.clone();
     canvas.connect_button_release_event(move |canvas, event| {
         if event.button() == 1 {
             if let Some(drag) = releasing.take() {
@@ -333,7 +388,14 @@ pub fn choose(
                 );
                 let previous = selection.replace(area);
                 update_controls(&size_label, &capture_button, area, area_mode.is_active());
-                place_toolbar(canvas, &drag_toolbar, area, width, height);
+                place_toolbar(
+                    canvas,
+                    &drag_toolbar,
+                    area,
+                    width,
+                    height,
+                    dragged_position.get(),
+                );
                 drag_toolbar.show();
                 redraw_selection(canvas, previous, area, width, height);
             }
@@ -495,15 +557,30 @@ fn set_selection_cursor(canvas: &gtk::DrawingArea) {
     window.set_cursor(cursor.as_ref());
 }
 
+/// Pins the controls at a logical position inside the overlay, chosen by dragging.
+fn place_toolbar_at(toolbar: &gtk::EventBox, position: (i32, i32)) {
+    toolbar.set_halign(gtk::Align::Start);
+    toolbar.set_valign(gtk::Align::Start);
+    toolbar.set_margin_start(position.0);
+    toolbar.set_margin_top(position.1);
+    toolbar.set_margin_bottom(0);
+}
+
 /// Move released controls above a selection that covers their usual bottom position.
 /// Selection pixels are transformed into the same logical coordinates as GTK allocations.
+/// A position chosen by dragging is kept as it is.
 fn place_toolbar(
     canvas: &gtk::DrawingArea,
-    toolbar: &gtk::Box,
+    toolbar: &gtk::EventBox,
     area: Option<Area>,
     width: i32,
     height: i32,
+    manual: Option<(i32, i32)>,
 ) {
+    if let Some(position) = manual {
+        place_toolbar_at(toolbar, position);
+        return;
+    }
     let overlaps_bottom = area.is_some_and(|area| {
         let (scale, left, top) = transform(canvas, width, height);
         let toolbar_left = f64::from(canvas.allocated_width() - toolbar.allocated_width()) / 2.0;

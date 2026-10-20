@@ -54,7 +54,24 @@ pub struct Controller {
     wayland: bool,
     jobs: glib::Sender<Job>,
     dimensions: Cell<(i32, i32)>,
+    frame_rate: Cell<u32>,
     shortcut_status: RefCell<String>,
+}
+
+/// Highest refresh rate among the connected monitors, in frames per second. GDK reports
+/// millihertz and zero when a backend does not know; 60 is the fallback.
+fn display_frame_rate() -> u32 {
+    let best = gtk::gdk::Display::default()
+        .map(|display| {
+            (0..display.n_monitors())
+                .filter_map(|index| display.monitor(index))
+                .map(|monitor| monitor.refresh_rate())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let rate = (f64::from(best) / 1000.0).round() as u32;
+    if rate == 0 { 60 } else { rate.clamp(24, 240) }
 }
 
 #[allow(deprecated)] // GTK 3 GLib channels wake the main loop as soon as work finishes.
@@ -169,6 +186,7 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
         wayland,
         jobs,
         dimensions: Cell::new((1920, 1080)),
+        frame_rate: Cell::new(60),
         shortcut_status: RefCell::new("Registering Print Screen…".into()),
     });
     let copy = state.clone();
@@ -211,9 +229,13 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
             let (width, height) = copy.dimensions.get();
             copy.recorder.set_tooltip_text(Some(&format!(
                 "{}\n{}",
-                copy.preset
-                    .get()
-                    .estimate(seconds, copy.sound.get(), width, height),
+                copy.preset.get().estimate(
+                    seconds,
+                    copy.sound.get(),
+                    width,
+                    height,
+                    copy.frame_rate.get()
+                ),
                 tr("Drag to move")
             )));
         }
@@ -472,6 +494,8 @@ impl Controller {
         let folder = self.preferences.borrow().videos.clone();
         let sound = self.sound.get();
         let preset = self.preset.get();
+        let frame_rate = display_frame_rate();
+        self.frame_rate.set(frame_rate);
         let native_stream = matches!(
             prepared.source,
             capture::Source::Wayland(_) | capture::Source::Gnome(_)
@@ -479,7 +503,7 @@ impl Controller {
         let start = move || {
             std::thread::spawn(move || {
                 let _ = sender.send(Job::Started(Recording::start(
-                    prepared, area, bounds, sound, preset, &folder,
+                    prepared, area, bounds, sound, preset, &folder, frame_rate,
                 )));
             });
         };
@@ -554,6 +578,7 @@ impl Controller {
             "Approximate size per minute. Recording continues until Stop is pressed.",
         ));
         let (width, height) = self.dimensions.get();
+        let frame_rate = display_frame_rate();
         let update = Rc::new({
             let quality = quality.clone();
             let sound = sound.clone();
@@ -562,7 +587,7 @@ impl Controller {
                 // The row title already says Estimated size; the shared text repeats it.
                 estimate.set_text(
                     &Preset::ALL[quality.active().unwrap_or(0) as usize]
-                        .estimate(60.0, sound.is_active(), width, height)
+                        .estimate(60.0, sound.is_active(), width, height, frame_rate)
                         .replace(&format!("{}: ", tr("Estimated size")), "")
                         .replace("for 60s", tr("per minute")),
                 );

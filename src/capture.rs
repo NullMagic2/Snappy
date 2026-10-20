@@ -256,6 +256,8 @@ pub struct Recording {
 
 impl Recording {
     /// Records lossless RGB + FLAC first, so changing an export profile never compounds loss.
+    /// Records at frame_rate frames per second, normally the display's refresh rate,
+    /// so motion is as smooth in the file as it was on screen.
     pub fn start(
         prepared: Prepared,
         area: Area,
@@ -263,6 +265,7 @@ impl Recording {
         sound: bool,
         preset: Preset,
         folder: &Path,
+        frame_rate: u32,
     ) -> Result<Self> {
         std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
         let stage = tempfile::Builder::new()
@@ -290,9 +293,9 @@ impl Recording {
                         "-f",
                         "x11grab",
                         "-framerate",
-                        "30",
-                        "-video_size",
                     ])
+                    .arg(frame_rate.to_string())
+                    .arg("-video_size")
                     .arg(format!("{}x{}", area.width, area.height))
                     .arg("-i")
                     .arg(format!("{display}+{},{}", area.x, area.y));
@@ -315,13 +318,27 @@ impl Recording {
                     .arg(format!("top={}", area.y))
                     .arg(format!("right={}", bounds.width - area.x - area.width))
                     .arg(format!("bottom={}", bounds.height - area.y - area.height))
+                    // A bounded queue keeps the PipeWire thread free while frames encode.
+                    // gst-libav's FFV1 encoder runs on one thread unless slices, the slice
+                    // thread type and threads=auto are all set; together they keep 4K at
+                    // the display rate within real time on a desktop CPU.
                     .args([
+                        "!",
+                        "queue",
+                        "max-size-buffers=8",
+                        "max-size-bytes=0",
+                        "max-size-time=0",
                         "!",
                         "videorate",
                         "!",
-                        "video/x-raw,format=BGRx,framerate=30/1",
+                    ])
+                    .arg(format!("video/x-raw,format=BGRx,framerate={frame_rate}/1"))
+                    .args([
                         "!",
                         "avenc_ffv1",
+                        "slices=16",
+                        "thread-type=slice",
+                        "threads=auto",
                         "!",
                         "queue",
                         "!",
@@ -435,11 +452,12 @@ impl Recording {
     }
 
     fn export(&mut self) -> Result<()> {
-        let (video, audio, height, fps) = self.preset.encoding();
+        let (video, audio, height) = self.preset.encoding();
         let stderr = File::create(&self.log).map_err(|e| e.to_string())?;
         // Escape the comma for FFmpeg's filter parser. Pad odd selections for H.264.
+        // The recorded frame rate is kept; only the resolution is limited.
         let filter = format!(
-            "scale=-2:'min({height}\\,ih)':force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2,fps={fps}"
+            "scale=-2:'min({height}\\,ih)':force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2"
         );
         let mut command = Command::new("ffmpeg");
         command

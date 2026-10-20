@@ -45,6 +45,21 @@ export default class SnappyIntegration extends Extension {
                 return false;
             return original.call(this, actor, ...args);
         });
+        // Wayland clients cannot ask to stay above other windows; keep the small
+        // recording bar above them here, identified by application and title.
+        this._windowCreated = global.display.connect('window-created', (_display, window) => {
+            const snappy = window.get_gtk_application_id() === APP_ID ||
+                window.get_wm_class() === APP_ID;
+            if (!snappy)
+                return;
+            const raise = () => {
+                if (this._enabled && window.get_title() === 'Snappy recording' && !window.is_above())
+                    window.make_above();
+            };
+            raise();
+            const titleSignal = window.connect('notify::title', raise);
+            window.connect('unmanaged', () => window.disconnect(titleSignal));
+        });
         this._lockdown = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
         this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
         this._object.export(Gio.DBus.session, PATH);
@@ -60,6 +75,8 @@ export default class SnappyIntegration extends Extension {
         this._animations = null;
         if (this._sessionModeSignal) Main.sessionMode.disconnect(this._sessionModeSignal);
         this._sessionModeSignal = 0;
+        if (this._windowCreated) global.display.disconnect(this._windowCreated);
+        this._windowCreated = 0;
         for (const path of this._sessions.keys())
             this._stop(path);
         this._object?.unexport();
