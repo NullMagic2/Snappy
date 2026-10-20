@@ -1,0 +1,7 @@
+{
+  "uuid": "snappy@snappy.local",
+  "name": "Snappy Capture Integration",
+  "description": "Connect the Snappy desktop app to GNOME Shell capture without portal sharing dialogs.",
+  "shell-version": ["46", "47", "48", "49", "50"],
+  "version": 2
+}

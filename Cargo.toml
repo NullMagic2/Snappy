@@ -1,0 +1,23 @@
+[package]
+name = "snappy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A small Yaru-themed GTK 3 screenshot and desktop recorder for Linux"
+license = "MIT"
+
+[dependencies]
+gtk = "=0.18.2"
+glib = "=0.18.5"
+ashpd = "=0.11.1"
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "time", "sync"] }
+futures-util = "=0.3.34"
+x11-dl = "=2.21.0"
+libc = "=0.2.190"
+tempfile = "=3.27.0"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

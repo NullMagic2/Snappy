@@ -1,0 +1,36 @@
+#!/bin/sh
+# Module: package_postinst. Purpose: configure the installing user's live desktop session.
+# Created: 2026-10-19. Architecture: drop root privileges before the shared user setup.
+set -eu
+[ "${1:-}" = configure ] || exit 0
+# sudo apt exposes its originating user; graphical installers can expose a numeric UID.
+desktop_user=${SUDO_USER:-}
+if [ -z "$desktop_user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    case "$PKEXEC_UID" in *[!0-9]*) exit 0 ;; esac
+    desktop_user=$(getent passwd "$PKEXEC_UID" | cut -d: -f1)
+fi
+[ -n "$desktop_user" ] && [ "$desktop_user" != root ] || exit 0
+user_uid=$(id -u "$desktop_user")
+[ "$user_uid" != 0 ] || exit 0
+runtime=/run/user/$user_uid
+[ -S "$runtime/bus" ] || exit 0
+session=$(loginctl show-user "$desktop_user" --property=Display --value 2>/dev/null || true)
+desktop=${XDG_CURRENT_DESKTOP:-}
+if [ -z "$desktop" ] && [ -n "$session" ]; then
+    desktop=$(loginctl show-session "$session" --property=Desktop --value 2>/dev/null || true)
+fi
+case "$desktop" in
+    *GNOME*|*gnome*|*Cinnamon*|*cinnamon*|*ubuntu*) ;;
+    *) exit 0 ;;
+esac
+# All preference and launcher writes run as the desktop user, on that user's bus.
+if ! runuser -u "$desktop_user" -- env \
+    -u GSETTINGS_BACKEND -u GSETTINGS_SCHEMA_DIR \
+    -u XDG_CONFIG_HOME -u XDG_DATA_HOME \
+    XDG_RUNTIME_DIR="$runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+    XDG_CURRENT_DESKTOP="$desktop" \
+    /usr/lib/snappy/launch --setup-only; then
+    echo 'Snappy is installed. Open Snappy once to finish Print Screen setup.' >&2
+fi
+exit 0

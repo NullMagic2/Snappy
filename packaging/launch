@@ -1,0 +1,26 @@
+#!/bin/sh
+# Module: package_launch. Purpose: apply per-user defaults after system installation.
+# Created: 2026-10-19. Architecture: reuse the executable's reversible desktop setup.
+set -eu
+config_root=${XDG_CONFIG_HOME:-"$HOME/.config"}/snappy
+marker=$config_root/package-defaults-applied
+if [ ! -f "$marker" ]; then
+    case ":${XDG_CURRENT_DESKTOP:-}:" in
+        *GNOME*|*gnome*|*Cinnamon*|*cinnamon*|*ubuntu*)
+            if /usr/bin/snappy --install; then
+                mkdir -p "$config_root"
+                (umask 077; printf '%s\n' integration-v2 > "$marker")
+            else
+                echo 'Snappy could not set up Print Screen; retry with snappy --install.' >&2
+            fi
+            ;;
+    esac
+elif [ "$(cat "$marker")" != integration-v2 ]; then
+    if /usr/bin/snappy --install-integration; then
+        (umask 077; printf '%s\n' integration-v2 > "$marker")
+    fi
+fi
+if [ "${1:-}" = '--setup-only' ]; then
+    exit 0
+fi
+exec /usr/bin/snappy --capture

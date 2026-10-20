@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Module: snappy.assets.recording_light
+     Purpose: Editable glass-light concept traced by eye from the selected reference.
+     Created: 2026-10-19. Design exploration; not embedded in the application. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Round transparent ruby recording light, reduced glow</title>
+  <defs>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ffb1a7"/><stop offset=".23" stop-color="#d90819"/>
+      <stop offset=".55" stop-color="#54000d"/><stop offset=".83" stop-color="#ff3035"/>
+      <stop offset="1" stop-color="#ffb398"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#f74248" stop-opacity=".92"/>
+      <stop offset=".35" stop-color="#a70012" stop-opacity=".86"/>
+      <stop offset=".7" stop-color="#85000f" stop-opacity=".93"/>
+      <stop offset="1" stop-color="#ff332c" stop-opacity=".95"/>
+    </linearGradient>
+    <radialGradient id="core" cx=".5" cy=".61" r=".59">
+      <stop stop-color="#ff7452" stop-opacity=".94"/>
+      <stop offset=".28" stop-color="#ff2d20" stop-opacity=".89"/>
+      <stop offset=".66" stop-color="#ed0018" stop-opacity=".46"/>
+      <stop offset="1" stop-color="#a00012" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="reflection" x1="0" y1="0" x2=".6" y2="1">
+      <stop stop-color="#fff" stop-opacity=".94"/>
+      <stop offset=".44" stop-color="#fff0ed" stop-opacity=".56"/>
+      <stop offset="1" stop-color="#fff0ed" stop-opacity=".02"/>
+    </linearGradient>
+    <linearGradient id="bottom" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#ff6b53" stop-opacity="0"/>
+      <stop offset=".65" stop-color="#ffb386" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#ff2c2a" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="contact" x="-.2" y="-.2" width="1.4" height="1.4" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+  </defs>
+  <!-- Change this group's scale to resize the light without changing its glass geometry.
+       Outer atmospheric glow is deliberately omitted; only a tight contact shadow remains. -->
+  <g>
+    <circle cx="256" cy="259" r="191" fill="#210515" opacity=".32" filter="url(#contact)"/>
+    <circle cx="256" cy="256" r="192" fill="#54000e" fill-opacity=".92"/>
+    <circle cx="256" cy="256" r="188" fill="url(#edge)"/>
+    <circle cx="256" cy="256" r="179" fill="#960011" fill-opacity=".8" stroke="#ff4c4a" stroke-opacity=".72" stroke-width="2"/>
+    <circle cx="256" cy="256" r="169" fill="url(#glass)" stroke="#470010" stroke-opacity=".7" stroke-width="4"/>
+    <circle cx="256" cy="256" r="155" fill="url(#core)"/>
+    <path d="M105 181 A169 169 0 0 1 362 124" fill="none" stroke="#ffaaa0" stroke-opacity=".82" stroke-width="4" stroke-linecap="round"/>
+    <path d="M123 169 C147 126 184 108 220 111 C237 114 238 137 223 155 C198 188 160 211 135 204 C120 200 116 185 123 169 Z" fill="url(#reflection)"/>
+    <path d="M143 361 A155 155 0 0 0 391 332" fill="none" stroke="url(#bottom)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M420 211 A170 170 0 0 1 211 420" fill="none" stroke="#ff4e43" stroke-opacity=".65" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

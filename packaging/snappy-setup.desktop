@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Snappy shortcut setup
+Exec=/usr/lib/snappy/launch --setup-only
+Icon=io.github.snappy.Capture
+NoDisplay=true
+X-GNOME-Autostart-Delay=5

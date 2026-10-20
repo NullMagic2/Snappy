@@ -1,0 +1,10 @@
+# Module: source_ignore. Purpose: exclude local data and generated release files.
+# Created: 2026-10-20. Architecture: binaries are distributed as release assets.
+/Binaries/
+/target/
+/sources/
+/AGENTS.md
+/.agents/
+/.aws/
+/.codex/
+*.log

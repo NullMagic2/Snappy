@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Snappy
+Comment=Capture your screen
+Exec=/usr/lib/snappy/launch
+Icon=io.github.snappy.Capture
+StartupWMClass=io.github.snappy.Capture
+Terminal=false
+Categories=Utility;AudioVideo;
+StartupNotify=true
+Keywords=screenshot;record;capture;
