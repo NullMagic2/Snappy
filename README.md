@@ -3,11 +3,12 @@ Module: snappy.documentation.readme
 Purpose: Public introduction, installation and release instructions.
 Created: 2026-10-20. Public application overview and installation instructions.
 -->
-# Snappy
+# What is Snappy
 
 <img src="assets/snappy.png" alt="Snappy icon" width="128">
 
-A compact screenshot and desktop recorder for Linux, built with Rust and GTK 3.
+A compact screenshot and desktop recorder for Linux, built with Rust and GTK 3. It was designed to make screen recording easier and more convenient.
+
 Press **Print Screen**, select the screen or an area, and capture.
 
 - Screenshot or record through a compact on-screen toolbar.
@@ -100,20 +101,3 @@ under your own account without changing Print Screen:
 ```sh
 ./install.sh --no-default
 ```
-
-## Current limits
-
-This is an early release. GNOME 50 Wayland and virtual X11 capture flows have been
-exercised during development. Clean installations on Ubuntu 24.04, Mint 22 and
-Debian 13 have not yet been verified; their package dependency names and binary
-glibc requirement have been checked.
-
-The supplied executable requires glibc 2.39 or newer. Older systems require a
-compatible build and package dependencies. GNOME extension metadata lists Shell
-46–50; live verification has been on Shell 50.
-
-Wayland recordings currently omit the pointer. Recording creates a temporary
-lossless file before export, which can require substantial disk space.
-Discord-friendly balances size and quality but does not guarantee that a long
-recording fits Discord's upload limit. GIF export is a single screenshot with up
-to 256 colors, not an animated recording.
