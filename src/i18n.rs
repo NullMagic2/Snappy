@@ -156,6 +156,13 @@ pub fn tr(key: &str) -> &str {
         ],
         "Language" => ["Language", "Idioma", "Γλώσσα", "Idioma", "Idioma"],
         "Shortcut" => ["Shortcut", "Atajo", "Συντόμευση", "Atalho", "Atalho"],
+        "Drag to move" => [
+            "Drag to move",
+            "Arrastra para mover",
+            "Σύρετε για μετακίνηση",
+            "Arraste para mover",
+            "Arraste para mover",
+        ],
         "Size" => ["Size", "Tamaño", "Μέγεθος", "Tamanho", "Tamanho"],
         "Estimated size" => [
             "Estimated size",

@@ -114,8 +114,26 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
     bar.pack_start(&elapsed, false, false, 0);
     bar.pack_start(&stop, false, false, 0);
     recorder.add(&bar);
+    // The bar is part of the screen, so it appears in a recording that covers its
+    // position. Pressing anywhere on the bar itself drags it; Stop handles its own
+    // presses. begin_move_drag works on X11 and through the compositor on Wayland.
+    recorder.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+    recorder.set_tooltip_text(Some(tr("Drag to move")));
+    recorder.connect_button_press_event(|window, event| {
+        if event.button() != 1 {
+            return glib::Propagation::Proceed;
+        }
+        let (x, y) = event.root();
+        window.begin_move_drag(1, x as i32, y as i32, event.time());
+        glib::Propagation::Stop
+    });
     if !wayland {
-        recorder.connect_size_allocate(|window, allocation| {
+        // Place the bar near the bottom once; later layout passes must not undo a drag.
+        let placed = Cell::new(false);
+        recorder.connect_size_allocate(move |window, allocation| {
+            if placed.replace(true) {
+                return;
+            }
             if let Some(screen) = gtk::prelude::GtkWindowExt::screen(window) {
                 if let Some(root) = screen.root_window() {
                     window.move_(
@@ -191,13 +209,13 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
                 seconds as u64 % 60
             ));
             let (width, height) = copy.dimensions.get();
-            copy.recorder
-                .set_tooltip_text(Some(&copy.preset.get().estimate(
-                    seconds,
-                    copy.sound.get(),
-                    width,
-                    height,
-                )));
+            copy.recorder.set_tooltip_text(Some(&format!(
+                "{}\n{}",
+                copy.preset
+                    .get()
+                    .estimate(seconds, copy.sound.get(), width, height),
+                tr("Drag to move")
+            )));
         }
         glib::ControlFlow::Continue
     });
