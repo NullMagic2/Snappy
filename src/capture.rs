@@ -57,11 +57,12 @@ pub enum Source {
 pub struct Prepared {
     pub source: Source,
     pub image: PathBuf,
+    pub show_pointer: bool,
     pub _scratch: tempfile::TempDir,
 }
 
 /// Captures a frozen preview. Wayland recording previews come from the exact selected stream.
-pub fn prepare(wayland: bool, video: bool) -> Result<Prepared> {
+pub fn prepare(wayland: bool, video: bool, show_pointer: bool) -> Result<Prepared> {
     let started = Instant::now();
     // The one-time encoder probe runs beside the preview so Record rarely waits for
     // it; X11 prepares before the user chooses between screenshot and video.
@@ -74,9 +75,9 @@ pub fn prepare(wayland: bool, video: bool) -> Result<Prepared> {
         .map_err(|e| e.to_string())?;
     let image = scratch.path().join("preview.png");
     let native = wayland && portal::runtime().block_on(gnome::available())?;
-    let source = if wayland && !video {
+    let source = if wayland && !video && (native || !show_pointer) {
         if native {
-            portal::runtime().block_on(gnome::screenshot(&image))?;
+            portal::runtime().block_on(gnome::screenshot(&image, show_pointer))?;
         } else {
             let path = portal::runtime().block_on(portal::screenshot())?;
             std::fs::copy(&path, &image)
@@ -85,9 +86,9 @@ pub fn prepare(wayland: bool, video: bool) -> Result<Prepared> {
         Source::Screenshot
     } else if wayland {
         let source = if native {
-            Source::Gnome(portal::runtime().block_on(gnome::Stream::request())?)
+            Source::Gnome(portal::runtime().block_on(gnome::Stream::request(show_pointer))?)
         } else {
-            Source::Wayland(portal::runtime().block_on(portal::Stream::request())?)
+            Source::Wayland(portal::runtime().block_on(portal::Stream::request(show_pointer))?)
         };
         let (node, remote) = stream_connection(&source)?;
         let mut command = pipewire_command(node, remote.as_ref(), false);
@@ -116,7 +117,7 @@ pub fn prepare(wayland: bool, video: bool) -> Result<Prepared> {
                 "-f",
                 "x11grab",
                 "-draw_mouse",
-                "0",
+                if show_pointer { "1" } else { "0" },
                 "-video_size",
             ])
             .arg(format!("{width}x{height}"))
@@ -139,6 +140,7 @@ pub fn prepare(wayland: bool, video: bool) -> Result<Prepared> {
     Ok(Prepared {
         source,
         image,
+        show_pointer,
         _scratch: scratch,
     })
 }
@@ -314,7 +316,7 @@ fn probe_hardware_encoders() -> HardwareEncoders {
             "video/x-raw,format=BGRx,width={width},height={height},framerate=60/1"
         ))
         .arg("!")
-        .args(gst_hardware_video(video, width, height))
+        .args(gst_hardware_video(video, width, height, Some(60)))
         .args([
             "!",
             "queue",
@@ -401,14 +403,34 @@ const GST_H264_COLORIMETRY: &str = "2:3:7:1";
 
 /// GStreamer video elements of the direct path: the GPU scales and converts each
 /// frame and encodes H.264 through VA-API; the parser reframes the byte stream for MP4.
-fn gst_hardware_video(video_kbps: u32, width: i32, height: i32) -> Vec<String> {
+fn gst_hardware_video(
+    video_kbps: u32,
+    width: i32,
+    height: i32,
+    frame_rate: Option<u32>,
+) -> Vec<String> {
     let rate = RateControl::new(video_kbps);
-    vec![
+    let mut arguments = vec![
         "vapostproc".into(),
         "!".into(),
         format!(
             "video/x-raw(memory:VAMemory),format=NV12,width={width},height={height},colorimetry={GST_H264_COLORIMETRY}"
         ),
+    ];
+    if let Some(frame_rate) = frame_rate {
+        // Keep the source's GPU buffers through conversion/scaling. Regulating
+        // cadence here only retains the small, GPU-owned output surfaces.
+        arguments.extend([
+            "!".into(),
+            "queue".into(),
+            "!".into(),
+            "videorate".into(),
+            "silent=false".into(),
+            "!".into(),
+            format!("video/x-raw(memory:VAMemory),framerate={frame_rate}/1"),
+        ]);
+    }
+    arguments.extend([
         "!".into(),
         "vah264enc".into(),
         "rate-control=vbr".into(),
@@ -417,7 +439,8 @@ fn gst_hardware_video(video_kbps: u32, width: i32, height: i32) -> Vec<String> {
         format!("cpb-size={}", rate.buffer),
         "!".into(),
         "h264parse".into(),
-    ]
+    ]);
+    arguments
 }
 
 /// GStreamer AAC encoder at the preset's audio rate; the libav property is in bits.
@@ -601,6 +624,7 @@ impl Recording {
         area: Area,
         bounds: Area,
         sound: bool,
+        show_pointer: bool,
         preset: Preset,
         folder: &Path,
         frame_rate: u32,
@@ -649,6 +673,7 @@ impl Recording {
                 command
                     .args(["-thread_queue_size", "512", "-f", "x11grab", "-framerate"])
                     .arg(frame_rate.to_string())
+                    .args(["-draw_mouse", if show_pointer { "1" } else { "0" }])
                     .arg("-video_size")
                     .arg(format!("{}x{}", area.width, area.height))
                     .arg("-i")
@@ -677,33 +702,40 @@ impl Recording {
                 let (node, remote) = connection.as_ref().expect("native stream connection");
                 let mut command = pipewire_command(*node, remote.as_ref(), true);
                 // The compositor only sends a frame when the screen changed, so the
-                // source repeats its last frame every half period: videorate then
-                // repeats a frame only when this pipeline itself failed to take the
-                // frames in time, and that count is what the saved popup reports.
-                command
-                    .arg(format!("keepalive-time={}", (500 / frame_rate).max(1)))
-                    .args(["!", "videoconvert", "!", "videocrop"])
-                    .arg(format!("left={}", area.x))
-                    .arg(format!("top={}", area.y))
-                    .arg(format!("right={}", bounds.width - area.x - area.width))
-                    .arg(format!("bottom={}", bounds.height - area.y - area.height))
-                    // A bounded queue keeps the PipeWire thread free while frames encode.
-                    .args([
-                        "!",
-                        "queue",
-                        "max-size-buffers=8",
-                        "max-size-bytes=0",
-                        "max-size-time=0",
-                        "!",
-                        "videorate",
-                        "silent=false",
-                        "!",
-                    ])
-                    .arg(format!("video/x-raw,format=BGRx,framerate={frame_rate}/1"));
-                if direct {
+                // source repeats its last frame between display updates. Videorate's
+                // duplicates estimate delivery gaps, not lost compositor redraws.
+                command.arg(format!("keepalive-time={}", (500 / frame_rate).max(1)));
+                // A full-screen GPU recording needs neither CPU conversion nor crop.
+                // Let PipeWire and VA-API negotiate DMA-BUF directly where available;
+                // the same chain also accepts shared-memory buffers on other desktops.
+                let gpu_full_screen = direct && area == bounds;
+                if !gpu_full_screen {
                     command
-                        .arg("!")
-                        .args(gst_hardware_video(video, size.0, size.1));
+                        .args(["!", "videoconvert", "!", "videocrop"])
+                        .arg(format!("left={}", area.x))
+                        .arg(format!("top={}", area.y))
+                        .arg(format!("right={}", bounds.width - area.x - area.width))
+                        .arg(format!("bottom={}", bounds.height - area.y - area.height))
+                        .args([
+                            "!",
+                            "queue",
+                            "max-size-buffers=8",
+                            "max-size-bytes=0",
+                            "max-size-time=0",
+                            "!",
+                            "videorate",
+                            "silent=false",
+                            "!",
+                        ])
+                        .arg(format!("video/x-raw,format=BGRx,framerate={frame_rate}/1"));
+                }
+                if direct {
+                    command.arg("!").args(gst_hardware_video(
+                        video,
+                        size.0,
+                        size.1,
+                        gpu_full_screen.then_some(frame_rate),
+                    ));
                 } else {
                     if compressed {
                         // Scaling on every core keeps a 4K source at the display rate.
@@ -951,7 +983,11 @@ impl Recording {
     fn recover(&mut self, error: String) -> String {
         let _ = std::fs::remove_file(&self.destination);
         let path = self.stage.take().map(|dir| dir.keep()).unwrap_or_default();
-        format!("{error}\nOriginal recording kept in {}", path.display())
+        format!(
+            "{error}\n{} {}",
+            crate::i18n::tr("Original recording kept in"),
+            path.display()
+        )
     }
 }
 

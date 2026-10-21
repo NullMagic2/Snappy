@@ -25,6 +25,9 @@ pub struct Choice {
     pub area: Area,
     pub video: bool,
     pub sound: bool,
+    pub show_pointer: bool,
+    pub selection: Option<Area>,
+    pub select_region: bool,
 }
 
 /// Places a draggable, resizable selection and capture controls directly over the desktop.
@@ -34,6 +37,9 @@ pub fn choose(
     image: &Pixbuf,
     video: bool,
     sound: bool,
+    show_pointer: bool,
+    selection: Option<Area>,
+    select_region: bool,
     settings: impl Fn(&gtk::Dialog, bool) -> bool + 'static,
     language_changed: impl Fn(Language) + 'static,
     wayland: bool,
@@ -108,7 +114,8 @@ pub fn choose(
     region.set_mode(false);
     let screen = gtk::RadioButton::with_label_from_widget(&region, tr("Screen"));
     screen.set_mode(false);
-    screen.set_active(true);
+    screen.set_active(!select_region || selection.is_none());
+    region.set_active(select_region && selection.is_some());
     targets.pack_start(&region, false, false, 0);
     targets.pack_start(&screen, false, false, 0);
     // Shows only a live selection size; the mode buttons already say the rest.
@@ -121,6 +128,11 @@ pub fn choose(
     audio.set_active(sound);
     update_audio_button(&audio);
     audio.connect_toggled(update_audio_button);
+    let pointer = gtk::ToggleButton::new();
+    pointer.set_active(show_pointer);
+    update_pointer_button(&pointer);
+    pointer.connect_toggled(update_pointer_button);
+    pointer.connect_scale_factor_notify(update_pointer_button);
     let gear = gtk::Button::from_icon_name(Some("emblem-system-symbolic"), gtk::IconSize::Button);
     gear.set_tooltip_text(Some(tr("Settings")));
     if let Some(accessible) = gear.accessible() {
@@ -142,13 +154,14 @@ pub fn choose(
     }
     let accept = gtk::Button::with_label(if video { tr("Record") } else { tr("Capture") });
     accept.style_context().add_class("suggested-action");
-    update_controls(&dimensions, &accept, None, region.is_active());
+    update_controls(&dimensions, &accept, selection, region.is_active());
     for widget in [
         cancel.upcast_ref::<gtk::Widget>(),
         modes.upcast_ref(),
         targets.upcast_ref(),
         dimensions.upcast_ref(),
         audio.upcast_ref(),
+        pointer.upcast_ref(),
         gear.upcast_ref(),
         languages.upcast_ref(),
         accept.upcast_ref(),
@@ -218,13 +231,14 @@ pub fn choose(
         });
     });
 
-    let selected = Rc::new(Cell::new(None::<Area>));
+    let selected = Rc::new(Cell::new(selection));
     {
         let photo = photo.clone();
         let movie = movie.clone();
         let region = region.clone();
         let screen = screen.clone();
         let audio = audio.clone();
+        let pointer = pointer.clone();
         let gear = gear.clone();
         let cancel = cancel.clone();
         let dimensions = dimensions.clone();
@@ -259,6 +273,7 @@ pub fn choose(
                 tr("Capture")
             });
             update_audio_button(&audio);
+            update_pointer_button(&pointer);
             update_controls(&dimensions, &accept, selected.get(), region.is_active());
         });
     }
@@ -476,6 +491,9 @@ pub fn choose(
             area,
             video: movie.is_active(),
             sound: audio.is_active(),
+            show_pointer: pointer.is_active(),
+            selection: selected.get(),
+            select_region: region.is_active(),
         })
     } else {
         None
@@ -523,6 +541,29 @@ fn redraw_selection(
             canvas.queue_draw_area(x, y, right - x, bottom - y);
         }
     }
+}
+
+/// A classic arrow pointer at the 16-pixel button icon size, solid white.
+fn pointer_arrow(scale: i32) -> Option<gtk::cairo::ImageSurface> {
+    let surface =
+        gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 16 * scale, 16 * scale)
+            .ok()?;
+    surface.set_device_scale(f64::from(scale), f64::from(scale));
+    let context = gtk::cairo::Context::new(&surface).ok()?;
+    context.set_line_join(gtk::cairo::LineJoin::Round);
+    context.move_to(3.5, 1.5);
+    context.line_to(3.5, 13.0);
+    context.line_to(6.5, 10.5);
+    context.line_to(8.5, 14.5);
+    context.line_to(10.5, 13.5);
+    context.line_to(8.5, 9.5);
+    context.line_to(12.5, 9.5);
+    context.close_path();
+    context.set_source_rgb(1.0, 1.0, 1.0);
+    context.fill_preserve().ok()?;
+    context.set_line_width(1.0);
+    context.stroke().ok()?;
+    Some(surface)
 }
 
 /// Draw a plain outlined plus instead of inheriting decorative crosshair cursor themes.
@@ -814,5 +855,24 @@ mod tests {
                 height: 30
             })
         );
+    }
+}
+
+/// Keep the icon-only control understandable to keyboard and screen-reader users.
+/// The icon is a plain white arrow pointer drawn here, not a themed mouse picture, so
+/// it contrasts with the dark toolbar. It is the same in both states: only the pressed
+/// button shows that the pointer is included, because a differently shaded arrow would
+/// read as another valid pointer rather than as a state.
+fn update_pointer_button(button: &gtk::ToggleButton) {
+    if let Some(surface) = pointer_arrow(button.scale_factor().max(1)) {
+        button.set_image(Some(&gtk::Image::from_surface(Some(&surface))));
+    }
+    button.set_tooltip_text(Some(tr(if button.is_active() {
+        "Include pointer in captures: On"
+    } else {
+        "Include pointer in captures: Off"
+    })));
+    if let Some(accessible) = button.accessible() {
+        accessible.set_name(tr("Mouse pointer"));
     }
 }

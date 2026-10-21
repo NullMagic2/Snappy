@@ -1,6 +1,10 @@
 //! Module: shortcut. Purpose: global Print Screen activation with explicit conflict reporting.
 //! Created: 2026-10-19. Architecture: workers send events; only the UI touches windows.
-use crate::{files::Result, portal};
+use crate::{
+    files::Result,
+    i18n::{self, tr},
+    portal,
+};
 use glib::Sender;
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -10,12 +14,36 @@ use std::{
 
 pub enum Event {
     Open,
-    Status(String),
+    Status(Status),
+}
+
+pub enum Status {
+    Registering,
+    Managed,
+    Ready,
+    Bound(String),
+    Unavailable(String),
+}
+
+impl Status {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Registering => tr("Registering Print Screen…").into(),
+            Self::Managed => tr("Print Screen: managed by the desktop").into(),
+            Self::Ready => tr("Print Screen: ready").into(),
+            Self::Bound(trigger) => format!("{}: {trigger}", tr("Capture shortcut")),
+            Self::Unavailable(error) => format!(
+                "{}\n{}",
+                i18n::error(error),
+                tr("Bind Print Screen to snappy --capture in system Keyboard Shortcuts.")
+            ),
+        }
+    }
 }
 
 pub fn start(wayland: bool, sender: Sender<Event>) {
     if crate::default_capture::is_managed() {
-        let _ = sender.send(Event::Status("Print Screen: managed by the desktop".into()));
+        let _ = sender.send(Event::Status(Status::Managed));
         return;
     }
     thread::spawn(move || {
@@ -25,7 +53,7 @@ pub fn start(wayland: bool, sender: Sender<Event>) {
             x11_shortcut(&sender)
         };
         if let Err(error) = result {
-            let _ = sender.send(Event::Status(format!("{error}\nYou can bind Print Screen in system Keyboard Shortcuts to: snappy --capture")));
+            let _ = sender.send(Event::Status(Status::Unavailable(error)));
         }
     });
 }
@@ -39,7 +67,7 @@ async fn wayland_shortcut(sender: &Sender<Event>) -> Result<()> {
         .map_err(|e| format!("Global shortcut portal unavailable: {e}"))?;
     let session = proxy.create_session().await.map_err(|e| e.to_string())?;
     let mut events = proxy.receive_activated().await.map_err(|e| e.to_string())?;
-    let shortcut = NewShortcut::new("capture", "Open Snappy").preferred_trigger("Print");
+    let shortcut = NewShortcut::new("capture", tr("Open Snappy")).preferred_trigger("Print");
     let response = proxy
         .bind_shortcuts(&session, &[shortcut], None)
         .await
@@ -50,10 +78,8 @@ async fn wayland_shortcut(sender: &Sender<Event>) -> Result<()> {
         .shortcuts()
         .first()
         .map(|s| s.trigger_description())
-        .unwrap_or("system shortcut");
-    let _ = sender.send(Event::Status(format!(
-        "{description} opens the capture controls."
-    )));
+        .unwrap_or(tr("System shortcut"));
+    let _ = sender.send(Event::Status(Status::Bound(description.into())));
     while events.next().await.is_some() {
         if sender.send(Event::Open).is_err() {
             break;
@@ -109,7 +135,7 @@ fn x11_shortcut(sender: &Sender<Event>) -> Result<()> {
             (x.XCloseDisplay)(display);
             return Err("Print Screen is already assigned to another application. Change its system shortcut to use Snappy.".into());
         }
-        let _ = sender.send(Event::Status("Print Screen: ready".into()));
+        let _ = sender.send(Event::Status(Status::Ready));
         loop {
             while (x.XPending)(display) > 0 {
                 let mut event: xlib::XEvent = std::mem::zeroed();

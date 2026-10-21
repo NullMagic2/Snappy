@@ -47,8 +47,9 @@ fn entry(binary: &Path) -> String {
         .replace('$', "\\$")
         .replace('%', "%%")
         .replace('\\', "\\\\");
-    format!(
-        "[Desktop Entry]\nType=Application\nName=Snappy\nComment=Capture your screen\nExec=\"{quoted}\" --capture\nIcon={APP_ID}\nStartupWMClass={APP_ID}\nTerminal=false\nCategories=Utility;AudioVideo;\nStartupNotify=true\nKeywords=screenshot;record;capture;\n"
+    include_str!("../packaging/io.github.snappy.Capture.desktop").replace(
+        "Exec=/usr/lib/snappy/launch",
+        &format!("Exec=\"{quoted}\" --capture"),
     )
 }
 

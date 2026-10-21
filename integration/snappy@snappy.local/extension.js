@@ -20,7 +20,9 @@ const SCREEN_ONLY = 'snappy-screen-only';
 const XML = `<node><interface name="${IFACE}">
 <method name="Ping"><arg type="u" direction="out"/></method>
 <method name="Screenshot"><arg type="ay" direction="out"/></method>
+<method name="ScreenshotWithPointer"><arg type="b" direction="in"/><arg type="ay" direction="out"/></method>
 <method name="StartStream"><arg type="o" direction="out"/><arg type="u" direction="out"/></method>
+<method name="StartStreamWithPointer"><arg type="b" direction="in"/><arg type="o" direction="out"/><arg type="u" direction="out"/></method>
 <method name="StopStream"><arg type="o" direction="in"/></method>
 </interface></node>`;
 
@@ -100,7 +102,7 @@ export default class SnappyIntegration extends Extension {
                     return;
                 const actor = window.get_compositor_private();
                 if (actor)
-                    this._lifted.delete(actor);
+                    this._lifted?.delete(actor);
                 if (this._enabled)
                     global.compositor.enable_unredirect();
             });
@@ -165,18 +167,22 @@ export default class SnappyIntegration extends Extension {
     async PingAsync(_parameters, invocation) {
         try {
             await this._authorize(invocation);
-            invocation.return_value(new GLib.Variant('(u)', [1]));
+            invocation.return_value(new GLib.Variant('(u)', [2]));
         } catch (error) { this._error(invocation, error); }
     }
 
-    async ScreenshotAsync(_parameters, invocation) {
+    ScreenshotAsync(_parameters, invocation) {
+        return this.ScreenshotWithPointerAsync([false], invocation);
+    }
+
+    async ScreenshotWithPointerAsync([showPointer], invocation) {
         try {
             await this._authorize(invocation);
             const screenshot = new Shell.Screenshot();
             const output = Gio.MemoryOutputStream.new_resizable();
             // The original async method is used because Shell may already promisify it.
             const take = screenshot._original_screenshot ?? screenshot.screenshot;
-            take.call(screenshot, false, output, (object, result) => {
+            take.call(screenshot, showPointer, output, (object, result) => {
                 try {
                     object.screenshot_finish(result);
                     output.close(null);
@@ -186,7 +192,11 @@ export default class SnappyIntegration extends Extension {
         } catch (error) { this._error(invocation, error); }
     }
 
-    async StartStreamAsync(_parameters, invocation) {
+    StartStreamAsync(_parameters, invocation) {
+        return this.StartStreamWithPointerAsync([false], invocation);
+    }
+
+    async StartStreamWithPointerAsync([showPointer], invocation) {
         let path;
         try {
             const sender = await this._authorize(invocation);
@@ -200,7 +210,7 @@ export default class SnappyIntegration extends Extension {
                 Gio.BusNameWatcherFlags.NONE, null, () => this._stop(path));
             const [stream] = await call(MUTTER, path, SESSION, 'RecordArea',
                 new GLib.Variant('(iiiia{sv})', [0, 0, global.stage.width, global.stage.height, {
-                    'cursor-mode': new GLib.Variant('u', 0),
+                    'cursor-mode': new GLib.Variant('u', showPointer ? 1 : 0),
                     'is-recording': new GLib.Variant('b', true),
                 }]), '(o)');
             const node = await new Promise((resolve, reject) => {

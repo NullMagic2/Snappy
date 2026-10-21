@@ -25,6 +25,11 @@ const DIALOG_CSS: &str = "
 
 enum Job {
     Prepared(Result<Prepared>),
+    ScreenshotPrepared {
+        result: Result<Prepared>,
+        area: Area,
+        bounds: Area,
+    },
     RecordingPrepared {
         result: Result<Prepared>,
         area: Area,
@@ -39,6 +44,7 @@ pub struct Controller {
     owner: gtk::ApplicationWindow,
     recorder: gtk::ApplicationWindow,
     elapsed: gtk::Label,
+    stop: gtk::Button,
     preferences: RefCell<Preferences>,
     preset: Cell<Preset>,
     sound: Cell<bool>,
@@ -55,7 +61,7 @@ pub struct Controller {
     jobs: glib::Sender<Job>,
     dimensions: Cell<(i32, i32)>,
     frame_rate: Cell<u32>,
-    shortcut_status: RefCell<String>,
+    shortcut_status: RefCell<shortcut::Status>,
 }
 
 /// Highest refresh rate among the connected monitors, in frames per second. GDK reports
@@ -131,8 +137,8 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
     bar.pack_start(&elapsed, false, false, 0);
     bar.pack_start(&stop, false, false, 0);
     recorder.add(&bar);
-    // The bar is part of the screen, so it appears in a recording that covers its
-    // position. Pressing anywhere on the bar itself drags it; Stop handles its own
+    // GNOME integration excludes this actor from capture. Pressing the bar drags
+    // it; Stop handles its own
     // presses. begin_move_drag works on X11 and through the compositor on Wayland.
     recorder.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
     recorder.set_tooltip_text(Some(tr("Drag to move")));
@@ -171,6 +177,7 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
         owner,
         recorder,
         elapsed,
+        stop: stop.clone(),
         preferences: RefCell::new(preferences),
         preset: Cell::new(Preset::Discord),
         sound: Cell::new(true),
@@ -187,7 +194,7 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
         jobs,
         dimensions: Cell::new((1920, 1080)),
         frame_rate: Cell::new(60),
-        shortcut_status: RefCell::new("Registering Print Screen…".into()),
+        shortcut_status: RefCell::new(shortcut::Status::Registering),
     });
     let copy = state.clone();
     stop.connect_clicked(move |_| copy.finish(false));
@@ -265,7 +272,7 @@ impl Controller {
                 let sender = self.jobs.clone();
                 let wayland = self.wayland;
                 std::thread::spawn(move || {
-                    let _ = sender.send(Job::Prepared(capture::prepare(wayland, false)));
+                    let _ = sender.send(Job::Prepared(capture::prepare(wayland, false, false)));
                 });
                 return;
             }
@@ -293,7 +300,7 @@ impl Controller {
         let wayland = self.wayland;
         std::thread::spawn(move || {
             // Showing the controls needs a still image, not a screen-sharing session.
-            let _ = sender.send(Job::Prepared(capture::prepare(wayland, false)));
+            let _ = sender.send(Job::Prepared(capture::prepare(wayland, false, false)));
         });
     }
 
@@ -313,6 +320,22 @@ impl Controller {
                     Err(error) => state.error(error),
                 });
             }
+            Job::ScreenshotPrepared {
+                result,
+                area,
+                bounds,
+            } => match result {
+                Ok(prepared) => match Pixbuf::from_file(&prepared.image) {
+                    Ok(image)
+                        if image.width() == bounds.width && image.height() == bounds.height =>
+                    {
+                        self.export_screenshot(&image, area);
+                    }
+                    Ok(_) => self.error("The screen layout changed. Please capture again.".into()),
+                    Err(error) => self.error(error.to_string()),
+                },
+                Err(error) => self.error(error),
+            },
             Job::RecordingPrepared {
                 result,
                 area,
@@ -404,11 +427,24 @@ impl Controller {
             _ => None,
         };
         let state = self.clone();
+        let show_pointer = self.preferences.borrow().show_pointer;
+        let (selection, select_region) = {
+            let preferences = self.preferences.borrow();
+            (
+                preferences
+                    .selection
+                    .and_then(|area| area.restore(bounds.width, bounds.height)),
+                preferences.select_region,
+            )
+        };
         let choice = selection::choose(
             &self.owner,
             &image,
             self.video.get(),
             self.sound.get(),
+            show_pointer,
+            selection,
+            select_region,
             move |parent, sound| {
                 state.sound.set(sound);
                 state.settings(parent);
@@ -418,6 +454,8 @@ impl Controller {
                 let state = self.clone();
                 move |language| {
                     state.preferences.borrow_mut().language = language;
+                    state.stop.set_label(tr("Stop"));
+                    state.recorder.set_tooltip_text(Some(tr("Drag to move")));
                     if let Err(error) = state.preferences.borrow().save() {
                         eprintln!("Snappy: {error}");
                     }
@@ -448,16 +486,30 @@ impl Controller {
         };
         self.video.set(choice.video);
         self.sound.set(choice.sound);
+        {
+            let mut preferences = self.preferences.borrow_mut();
+            preferences.show_pointer = choice.show_pointer;
+            preferences.select_region = choice.select_region;
+            if let Some(area) = choice.selection {
+                preferences.selection =
+                    crate::preferences::RememberedArea::new(area, bounds.width, bounds.height);
+            }
+            if let Err(error) = preferences.save() {
+                eprintln!("Snappy: {error}");
+            }
+        }
         let area = choice.area;
         self.dimensions.set((area.width, area.height));
         if choice.video {
-            if matches!(&prepared.source, capture::Source::Screenshot) {
+            if matches!(&prepared.source, capture::Source::Screenshot)
+                || (self.wayland && prepared.show_pointer != choice.show_pointer)
+            {
                 let sender = self.jobs.clone();
                 let single_monitor =
                     gtk::gdk::Display::default().is_some_and(|display| display.n_monitors() == 1);
                 std::thread::spawn(move || {
                     let _ = sender.send(Job::RecordingPrepared {
-                        result: capture::prepare(true, true),
+                        result: capture::prepare(true, true, choice.show_pointer),
                         area,
                         bounds,
                         single_monitor,
@@ -467,32 +519,52 @@ impl Controller {
                 self.start_recording(prepared, area, bounds);
             }
         } else {
-            let cropped = image.new_subpixbuf(area.x, area.y, area.width, area.height);
-            let image_folder = self.preferences.borrow().images.clone();
-            let state = self.clone();
-            save_screenshot(
-                &self.owner,
-                &cropped,
-                &image_folder,
-                move |result| match result {
-                    Ok(Some((path, size))) => {
-                        if let Err(error) = state.preferences.borrow_mut().remember_image(&path) {
-                            state.error(error);
-                        }
-                        state.saved(path, size as u64, capture::FrameStatistics::default());
-                    }
-                    Ok(None) => (),
-                    Err(error) => state.error(error),
-                },
-            );
-            self.busy.set(false);
+            if choice.show_pointer || prepared.show_pointer {
+                let sender = self.jobs.clone();
+                let wayland = self.wayland;
+                // Let the compositor remove the overlay before taking the final image.
+                glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                    std::thread::spawn(move || {
+                        let _ = sender.send(Job::ScreenshotPrepared {
+                            result: capture::prepare(wayland, false, choice.show_pointer),
+                            area,
+                            bounds,
+                        });
+                    });
+                });
+            } else {
+                self.export_screenshot(&image, area);
+            }
         }
+    }
+
+    fn export_screenshot(self: &Rc<Self>, image: &Pixbuf, area: Area) {
+        let cropped = image.new_subpixbuf(area.x, area.y, area.width, area.height);
+        let image_folder = self.preferences.borrow().images.clone();
+        let state = self.clone();
+        save_screenshot(
+            &self.owner,
+            &cropped,
+            &image_folder,
+            move |result| match result {
+                Ok(Some((path, size))) => {
+                    if let Err(error) = state.preferences.borrow_mut().remember_image(&path) {
+                        state.error(error);
+                    }
+                    state.saved(path, size as u64, capture::FrameStatistics::default());
+                }
+                Ok(None) => (),
+                Err(error) => state.error(error),
+            },
+        );
+        self.busy.set(false);
     }
 
     fn start_recording(self: &Rc<Self>, prepared: Prepared, area: Area, bounds: Area) {
         let sender = self.jobs.clone();
         let folder = self.preferences.borrow().videos.clone();
         let sound = self.sound.get();
+        let show_pointer = self.preferences.borrow().show_pointer;
         let preset = self.preset.get();
         let frame_rate = display_frame_rate();
         self.frame_rate.set(frame_rate);
@@ -503,7 +575,14 @@ impl Controller {
         let start = move || {
             std::thread::spawn(move || {
                 let _ = sender.send(Job::Started(Recording::start(
-                    prepared, area, bounds, sound, preset, &folder, frame_rate,
+                    prepared,
+                    area,
+                    bounds,
+                    sound,
+                    show_pointer,
+                    preset,
+                    &folder,
+                    frame_rate,
                 )));
             });
         };
@@ -574,9 +653,9 @@ impl Controller {
         estimate.set_xalign(0.0);
         estimate.set_line_wrap(true);
         estimate.set_max_width_chars(48);
-        estimate.set_tooltip_text(Some(
+        estimate.set_tooltip_text(Some(tr(
             "Approximate size per minute. Recording continues until Stop is pressed.",
-        ));
+        )));
         let (width, height) = self.dimensions.get();
         let frame_rate = display_frame_rate();
         let update = Rc::new({
@@ -589,7 +668,7 @@ impl Controller {
                     &Preset::ALL[quality.active().unwrap_or(0) as usize]
                         .estimate(60.0, sound.is_active(), width, height, frame_rate)
                         .replace(&format!("{}: ", tr("Estimated size")), "")
-                        .replace("for 60s", tr("per minute")),
+                        .replace(&format!("{} 60s", tr("for")), tr("per minute")),
                 );
             }
         });
@@ -599,7 +678,7 @@ impl Controller {
         let copy = update.clone();
         let sound_handler = sound.connect_active_notify(move |_| copy());
         settings_row(&dialog, &labels, tr("Estimated size"), &estimate);
-        let shortcut = gtk::Label::new(Some(&self.shortcut_status.borrow()));
+        let shortcut = gtk::Label::new(Some(&self.shortcut_status.borrow().label()));
         shortcut.set_selectable(true);
         shortcut.set_line_wrap(true);
         shortcut.set_max_width_chars(48);
@@ -654,9 +733,11 @@ impl Controller {
             Some(&self.owner),
             gtk::DialogFlags::MODAL,
             gtk::MessageType::Error,
-            gtk::ButtonsType::Close,
-            &error,
+            gtk::ButtonsType::None,
+            tr("Could not complete capture"),
         );
+        dialog.add_button(tr("Close"), gtk::ResponseType::Close);
+        dialog.set_secondary_text(Some(&i18n::error(&error)));
         dialog.set_title("Snappy");
         center_dialog(&dialog, &self.owner);
         dialog.connect_response(|dialog, _| {
@@ -732,9 +813,9 @@ fn folder_setting(
     row.pack_start(&folder, true, true, 0);
     if let Some(default) = default {
         let reset = gtk::Button::with_label(tr("Default"));
-        reset.set_tooltip_text(Some(&format!("Use {}", default.display())));
+        reset.set_tooltip_text(Some(&format!("{} {}", tr("Use"), default.display())));
         if let Some(accessible) = reset.accessible() {
-            accessible.set_name(&format!("Default {title} folder"));
+            accessible.set_name(&format!("{} · {title}", tr("Default folder")));
         }
         let copy = folder.clone();
         let default = default.to_owned();
@@ -1011,7 +1092,10 @@ fn save_screenshot(
                 data.replace(bytes);
                 copy.set_response_sensitive(gtk::ResponseType::Accept, true);
             }
-            Err(error) => size.set_text(&error),
+            Err(error) => {
+                size.set_text(tr("Could not calculate size"));
+                size.set_tooltip_text(Some(&i18n::error(&error)));
+            }
         }
         glib::ControlFlow::Continue
     });

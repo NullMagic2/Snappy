@@ -48,26 +48,42 @@ pub async fn available() -> Result<bool> {
     let connection = connection().await?;
     let native = proxy(&connection).await?;
     match native.call::<_, _, u32>("Ping", &()).await {
-        Ok(1) => Ok(true),
+        Ok(1 | 2) => Ok(true),
         Ok(_) => Err("Unsupported Snappy GNOME Shell integration version".into()),
         Err(error) if installed() => Err(format!(
-            "Snappy GNOME Shell integration is not ready. Sign out and back in once after installation, then enable Snappy Capture Integration in Extensions. {error}"
+            "{}: {error}",
+            crate::i18n::tr(
+                "Snappy GNOME Shell integration is not ready. Sign out and back in once after installation, then enable Snappy Capture Integration in Extensions."
+            )
         )),
         Err(_) => Ok(false),
     }
 }
 
-pub async fn screenshot(path: &Path) -> Result<()> {
+pub async fn screenshot(path: &Path, show_pointer: bool) -> Result<()> {
     let connection = connection().await?;
-    let bytes: Vec<u8> = proxy(&connection)
-        .await?
-        .call("Screenshot", &())
-        .await
-        .map_err(|e| e.to_string())?;
+    let native = proxy(&connection).await?;
+    let bytes: Vec<u8> = if show_pointer {
+        require_current(&native).await?;
+        native.call("ScreenshotWithPointer", &(show_pointer,)).await
+    } else {
+        native.call("Screenshot", &()).await
+    }
+    .map_err(|e| e.to_string())?;
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err("Shell returned an invalid screenshot".into());
     }
     std::fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+/// A cached Shell module can survive an app/package restart. Refuse recording with
+/// an older integration that cannot exclude the recording controls.
+async fn require_current(native: &zbus::Proxy<'_>) -> Result<()> {
+    let version: u32 = native.call("Ping", &()).await.map_err(|e| e.to_string())?;
+    if version != 2 {
+        return Err("GNOME is still running an older Snappy integration. Install the latest Snappy package, then sign out and back in to load it.".into());
+    }
+    Ok(())
 }
 
 pub struct Stream {
@@ -77,11 +93,12 @@ pub struct Stream {
 }
 
 impl Stream {
-    pub async fn request() -> Result<Self> {
+    pub async fn request(show_pointer: bool) -> Result<Self> {
         let connection = connection().await?;
-        let (path, node) = proxy(&connection)
-            .await?
-            .call("StartStream", &())
+        let native = proxy(&connection).await?;
+        require_current(&native).await?;
+        let (path, node) = native
+            .call("StartStreamWithPointer", &(show_pointer,))
             .await
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -169,13 +186,13 @@ mod tests {
         let image = directory.path().join("snapshot.png");
         portal::runtime().block_on(async {
             assert!(available().await.unwrap());
-            screenshot(&image).await.unwrap();
+            screenshot(&image, false).await.unwrap();
             assert!(
                 std::fs::read(&image)
                     .unwrap()
                     .starts_with(b"\x89PNG\r\n\x1a\n")
             );
-            let stream = Stream::request().await.unwrap();
+            let stream = Stream::request(false).await.unwrap();
             assert_eq!(stream.node, 777);
             drop(stream);
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;

@@ -51,7 +51,7 @@ pub struct Stream {
 
 impl Stream {
     /// Requests one monitor. The compositor owns screen choice and consent.
-    pub async fn request() -> Result<Self> {
+    pub async fn request(show_pointer: bool) -> Result<Self> {
         initialize().await?;
         let proxy = Screencast::new().await.map_err(portal_error)?;
         let session = proxy.create_session().await.map_err(portal_error)?;
@@ -61,8 +61,11 @@ impl Stream {
             proxy
                 .select_sources(
                     &session,
-                    // Keep the frozen overlay free of a second, captured pointer.
-                    CursorMode::Hidden,
+                    if show_pointer {
+                        CursorMode::Embedded
+                    } else {
+                        CursorMode::Hidden
+                    },
                     SourceType::Monitor.into(),
                     false,
                     restore_token.as_deref(),
@@ -145,6 +148,9 @@ pub async fn screenshot() -> Result<PathBuf> {
 
 fn portal_error(error: ashpd::Error) -> String {
     format!(
-        "Desktop portal: {error}. Check that xdg-desktop-portal and your desktop's portal backend are installed. You can cancel and try again."
+        "{}: {error}",
+        crate::i18n::tr(
+            "The desktop portal could not complete capture. Check that its backend is installed, then try again."
+        )
     )
 }
