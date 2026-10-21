@@ -2,8 +2,10 @@
  * Created: 2026-10-19. Architecture: only GNOME integration lives here; Rust owns UI,
  * audio, encoding, export and file destinations. No global security policy is changed.
  */
+import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import Shell from 'gi://Shell';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -14,6 +16,7 @@ const IFACE = 'io.github.snappy.Capture.Shell';
 const MUTTER = 'org.gnome.Mutter.ScreenCast';
 const SESSION = `${MUTTER}.Session`;
 const STREAM = `${MUTTER}.Stream`;
+const SCREEN_ONLY = 'snappy-screen-only';
 const XML = `<node><interface name="${IFACE}">
 <method name="Ping"><arg type="u" direction="out"/></method>
 <method name="Screenshot"><arg type="ay" direction="out"/></method>
@@ -32,6 +35,21 @@ function call(destination, path, iface, method, parameters, replyType = null) {
         }));
 }
 
+/* Paints its actor only into stage views, that is onto the screen. Mutter paints
+ * screencast frames and screenshots into their own framebuffers, and this effect skips
+ * those paints, so the recording bar stays visible above everything while recording
+ * yet never appears in the recording. Picking is untouched, so Stop stays clickable.
+ */
+const ScreenOnly = GObject.registerClass(class SnappyScreenOnly extends Clutter.Effect {
+    vfunc_paint(node, paintContext, flags) {
+        const framebuffer = paintContext.get_framebuffer();
+        const onScreen = this.get_actor().peek_stage_views()
+            .some(view => view.get_framebuffer() === framebuffer);
+        if (onScreen)
+            super.vfunc_paint(node, paintContext, flags);
+    }
+});
+
 export default class SnappyIntegration extends Extension {
     enable() {
         this._sessions = new Map();
@@ -49,6 +67,7 @@ export default class SnappyIntegration extends Extension {
         // window sits below a focused fullscreen one (a game, a video). The recording
         // bar is therefore lifted into the group above every window layer, and
         // fullscreen unredirection stays off while it exists so it is always composited.
+        // Its actor is painted on screen only, so recordings do not contain the bar.
         // Identity and title can arrive after window-created, so they are checked
         // again whenever they change and when the window is first shown.
         this._lifted = new Set();
@@ -68,6 +87,7 @@ export default class SnappyIntegration extends Extension {
                 window.make_above();
                 actor.get_parent()?.remove_child(actor);
                 global.top_window_group.add_child(actor);
+                actor.add_effect_with_name(SCREEN_ONLY, new ScreenOnly());
                 global.compositor.disable_unredirect();
                 this._lifted.add(actor);
             };
@@ -104,6 +124,7 @@ export default class SnappyIntegration extends Extension {
         if (this._windowCreated) global.display.disconnect(this._windowCreated);
         this._windowCreated = 0;
         for (const actor of this._lifted ?? []) {
+            actor.remove_effect_by_name(SCREEN_ONLY);
             actor.get_parent()?.remove_child(actor);
             global.window_group.add_child(actor);
             global.compositor.enable_unredirect();
