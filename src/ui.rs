@@ -1159,6 +1159,9 @@ fn save_screenshot(
         });
     });
     dialog.show_all();
+    // Older unsaved captures stay open. Explicitly focus the new dialog after
+    // the selector closes so the window manager cannot leave an older preview on top.
+    dialog.present();
 }
 
 /// Releases a completed dialog after callers have collected all widget state.
