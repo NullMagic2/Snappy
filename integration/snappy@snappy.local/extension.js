@@ -6,6 +6,7 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -72,42 +73,13 @@ export default class SnappyIntegration extends Extension {
         // Its actor is painted on screen only, so recordings do not contain the bar.
         // Identity and title can arrive after window-created, so they are checked
         // again whenever they change and when the window is first shown.
-        this._lifted = new Set();
-        this._windowCreated = global.display.connect('window-created', (_display, window) => {
-            let lifted = false;
-            const lift = () => {
-                if (!this._enabled || lifted)
-                    return;
-                const snappy = window.get_gtk_application_id() === APP_ID ||
-                    window.get_wm_class() === APP_ID;
-                if (!snappy || window.get_title() !== 'Snappy recording')
-                    return;
-                const actor = window.get_compositor_private();
-                if (!actor)
-                    return;
-                lifted = true;
-                window.make_above();
-                actor.get_parent()?.remove_child(actor);
-                global.top_window_group.add_child(actor);
-                actor.add_effect_with_name(SCREEN_ONLY, new ScreenOnly());
-                global.compositor.disable_unredirect();
-                this._lifted.add(actor);
-            };
-            const signals = ['shown', 'notify::title', 'notify::wm-class', 'notify::gtk-application-id']
-                .map(name => window.connect(name, lift));
-            window.connect('unmanaged', () => {
-                for (const id of signals)
-                    window.disconnect(id);
-                if (!lifted)
-                    return;
-                const actor = window.get_compositor_private();
-                if (actor)
-                    this._lifted?.delete(actor);
-                if (this._enabled)
-                    global.compositor.enable_unredirect();
-            });
-            lift();
-        });
+        this._windows = new Map();
+        this._refreshSource = 0;
+        this._windowCreated = global.display.connect('window-created', (_display, window) =>
+            this._watchWindow(window));
+        this._restacked = global.display.connect('restacked', () => this._queueRefresh());
+        for (const actor of global.get_window_actors())
+            this._watchWindow(actor.get_meta_window());
         this._lockdown = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
         this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
         this._object.export(Gio.DBus.session, PATH);
@@ -125,18 +97,94 @@ export default class SnappyIntegration extends Extension {
         this._sessionModeSignal = 0;
         if (this._windowCreated) global.display.disconnect(this._windowCreated);
         this._windowCreated = 0;
-        for (const actor of this._lifted ?? []) {
-            actor.remove_effect_by_name(SCREEN_ONLY);
-            actor.get_parent()?.remove_child(actor);
-            global.window_group.add_child(actor);
-            global.compositor.enable_unredirect();
+        if (this._restacked) global.display.disconnect(this._restacked);
+        this._restacked = 0;
+        if (this._refreshSource) global.compositor.get_laters().remove(this._refreshSource);
+        this._refreshSource = 0;
+        for (const [window, record] of this._windows) {
+            for (const id of record.signals) window.disconnect(id);
+            this._releaseWindow(window, record, true);
         }
-        this._lifted = null;
+        this._windows.clear();
         for (const path of this._sessions.keys())
             this._stop(path);
         this._object?.unexport();
         this._object = null;
         this._lockdown = null;
+    }
+
+    // Track existing windows as well as new ones: Shell may enable the extension
+    // while Snappy is already recording. Keep every signal scoped to this enable.
+    _watchWindow(window) {
+        if (!window || this._windows.has(window))
+            return;
+        const record = {actor: null, wasAbove: false, signals: []};
+        this._windows.set(window, record);
+        for (const name of ['shown', 'notify::title', 'notify::wm-class', 'notify::gtk-application-id'])
+            record.signals.push(window.connect(name, () => this._queueRefresh()));
+        record.signals.push(window.connect('unmanaged', () => {
+            for (const id of record.signals) window.disconnect(id);
+            this._releaseWindow(window, record, false);
+            this._windows.delete(window);
+        }));
+        this._queueRefresh();
+    }
+
+    _queueRefresh() {
+        if (!this._enabled || this._refreshSource)
+            return;
+        // Wait until Mutter has finished mapping/restacking. Raising a window in
+        // window-created can run before it has a stack position.
+        this._refreshSource = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            this._refreshSource = 0;
+            for (const [window, record] of this._windows) {
+                const snappy = window.get_gtk_application_id() === APP_ID ||
+                    window.get_wm_class() === APP_ID;
+                if (!snappy || window.get_title() !== 'Snappy recording') {
+                    this._releaseWindow(window, record, true);
+                    continue;
+                }
+                const actor = window.get_compositor_private();
+                if (!actor?.is_mapped())
+                    continue;
+                if (!record.actor) {
+                    record.actor = actor;
+                    record.wasAbove = window.is_above();
+                    actor.add_effect_with_name(SCREEN_ONLY, new ScreenOnly());
+                    global.compositor.disable_unredirect();
+                }
+                if (!window.is_above()) window.make_above();
+                this._moveActor(actor, global.top_window_group);
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _moveActor(actor, parent) {
+        if (actor.get_parent() === parent)
+            return;
+        // Unmap before reparenting so Clutter does not mutate its pointer-device
+        // table while it is updating picks for a mapped actor being removed.
+        const visible = actor.visible;
+        actor.hide();
+        actor.get_parent()?.remove_child(actor);
+        parent.add_child(actor);
+        if (visible) actor.show();
+    }
+
+    _releaseWindow(window, record, restore) {
+        const actor = record.actor;
+        if (!actor)
+            return;
+        record.actor = null;
+        // On unmanage Mutter owns actor destruction, including its effects.
+        if (restore) {
+            actor.remove_effect_by_name(SCREEN_ONLY);
+            if (actor.get_parent() === global.top_window_group)
+                this._moveActor(actor, global.window_group);
+            if (!record.wasAbove) window.unmake_above();
+        }
+        global.compositor.enable_unredirect();
     }
 
     async _authorize(invocation) {
@@ -167,7 +215,7 @@ export default class SnappyIntegration extends Extension {
     async PingAsync(_parameters, invocation) {
         try {
             await this._authorize(invocation);
-            invocation.return_value(new GLib.Variant('(u)', [2]));
+            invocation.return_value(new GLib.Variant('(u)', [3]));
         } catch (error) { this._error(invocation, error); }
     }
 

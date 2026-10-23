@@ -80,6 +80,13 @@ fn translated(key: &str, language: Language) -> &str {
         "Cancel" => ["Cancel", "Cancelar", "Ακύρωση", "Cancelar", "Cancelar"],
         "Save" => ["Save", "Guardar", "Αποθήκευση", "Salvar", "Guardar"],
         "Copy" => ["Copy", "Copiar", "Αντιγραφή", "Copiar", "Copiar"],
+        "Copy message" => [
+            "Copy message",
+            "Copiar mensaje",
+            "Αντιγραφή μηνύματος",
+            "Copiar mensagem",
+            "Copiar mensagem",
+        ],
         "Copied" => ["Copied", "Copiado", "Αντιγράφηκε", "Copiado", "Copiado"],
         "OK" => ["OK", "Aceptar", "Εντάξει", "OK", "OK"],
         "Done" => ["Done", "Hecho", "Τέλος", "Concluído", "Concluído"],

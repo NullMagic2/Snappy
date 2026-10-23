@@ -52,6 +52,7 @@ pub struct Controller {
     busy: Cell<bool>,
     recording: RefCell<Option<Recording>>,
     saving: RefCell<Option<gtk::Dialog>>,
+    screenshot_save: glib::WeakRef<gtk::Dialog>,
     overlay: glib::WeakRef<gtk::Dialog>,
     settings_dialog: glib::WeakRef<gtk::Dialog>,
     recapturing: Cell<bool>,
@@ -185,6 +186,7 @@ pub fn build(app: &gtk::Application) -> Rc<Controller> {
         busy: Cell::new(false),
         recording: RefCell::new(None),
         saving: RefCell::new(None),
+        screenshot_save: glib::WeakRef::new(),
         overlay: glib::WeakRef::new(),
         settings_dialog: glib::WeakRef::new(),
         recapturing: Cell::new(false),
@@ -542,21 +544,32 @@ impl Controller {
         let cropped = image.new_subpixbuf(area.x, area.y, area.width, area.height);
         let image_folder = self.preferences.borrow().images.clone();
         let state = self.clone();
-        save_screenshot(
-            &self.owner,
-            &cropped,
-            &image_folder,
-            move |result| match result {
-                Ok(Some((path, size))) => {
-                    if let Err(error) = state.preferences.borrow_mut().remember_image(&path) {
-                        state.error(error);
+        let dialog =
+            screenshot_dialog(
+                &self.owner,
+                &cropped,
+                &image_folder,
+                move |result| match result {
+                    Ok(Some((path, size))) => {
+                        if let Err(error) = state.preferences.borrow_mut().remember_image(&path) {
+                            state.error(error);
+                        }
+                        state.saved(path, size as u64, capture::FrameStatistics::default());
                     }
-                    state.saved(path, size as u64, capture::FrameStatistics::default());
-                }
-                Ok(None) => (),
-                Err(error) => state.error(error),
-            },
-        );
+                    Ok(None) => (),
+                    Err(error) => state.error(error),
+                },
+            );
+        if let Some(dialog) = dialog {
+            // Only an accepted capture replaces the pending photo. Route the old
+            // dialog through Cancel so its chooser and encoding callbacks are released.
+            if let Some(previous) = self.screenshot_save.upgrade() {
+                previous.response(gtk::ResponseType::Cancel);
+            }
+            self.screenshot_save.set(Some(&dialog));
+            dialog.show_all();
+            dialog.present();
+        }
         self.busy.set(false);
     }
 
@@ -715,9 +728,8 @@ impl Controller {
 
     fn saved(self: &Rc<Self>, path: PathBuf, bytes: u64, frames: capture::FrameStatistics) {
         let state = self.clone();
-        // Confirmation must not hold the worker-event source inside its modal loop.
-        glib::idle_add_local_once(move || {
-            show_saved(&state.owner, &path, bytes, frames);
+        let owner = self.owner.clone();
+        show_saved(&owner, &path, bytes, frames, move || {
             if state.quit_after.get() {
                 if let Some(app) = state.owner.application() {
                     app.quit();
@@ -727,20 +739,37 @@ impl Controller {
     }
 
     fn error(&self, error: String) {
-        self.busy.set(false);
-        self.recorder.hide();
+        if self.recording.borrow().is_none() {
+            self.busy.set(false);
+            self.recorder.hide();
+        }
         let dialog = gtk::MessageDialog::new(
             Some(&self.owner),
-            gtk::DialogFlags::MODAL,
+            gtk::DialogFlags::empty(),
             gtk::MessageType::Error,
             gtk::ButtonsType::None,
             tr("Could not complete capture"),
         );
         dialog.add_button(tr("Close"), gtk::ResponseType::Close);
-        dialog.set_secondary_text(Some(&i18n::error(&error)));
+        let details = i18n::error(&error);
+        dialog.set_secondary_text(Some(&details));
+        let message = format!("{}\n\n{details}", tr("Could not complete capture"));
+        let copy = gtk::Button::from_icon_name(Some("edit-copy-symbolic"), gtk::IconSize::Button);
+        copy.set_tooltip_text(Some(tr("Copy message")));
+        if let Some(accessible) = copy.accessible() {
+            accessible.set_name(tr("Copy message"));
+        }
+        dialog.add_action_widget(&copy, gtk::ResponseType::Apply);
         dialog.set_title("Snappy");
         center_dialog(&dialog, &self.owner);
-        dialog.connect_response(|dialog, _| {
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Apply {
+                let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+                clipboard.set_text(&message);
+                clipboard.store();
+                copy.set_tooltip_text(Some(tr("Copied")));
+                return;
+            }
             dialog.hide();
             let dialog = dialog.clone();
             glib::idle_add_local_once(move || dismiss_dialog(&dialog));
@@ -857,11 +886,12 @@ fn show_saved(
     path: &Path,
     bytes: u64,
     frames: capture::FrameStatistics,
+    completed: impl FnOnce() + 'static,
 ) {
     let dialog = gtk::Dialog::with_buttons(
         Some(tr("Capture saved")),
         Some(parent),
-        gtk::DialogFlags::MODAL,
+        gtk::DialogFlags::empty(),
         &[(tr("OK"), gtk::ResponseType::Ok)],
     );
     center_dialog(&dialog, parent);
@@ -894,9 +924,22 @@ fn show_saved(
         dropped.set_xalign(0.0);
         dialog.content_area().pack_start(&dropped, false, false, 0);
     }
+    // A confirmation may stay open during the next recording. It must not grab
+    // input from the Stop control or keep a nested dialog loop alive.
+    let completed = RefCell::new(Some(completed));
+    dialog.connect_response(move |dialog, _| {
+        let Some(completed) = completed.borrow_mut().take() else {
+            return;
+        };
+        dialog.hide();
+        let dialog = dialog.clone();
+        glib::idle_add_local_once(move || {
+            dismiss_dialog(&dialog);
+            completed();
+        });
+    });
     dialog.show_all();
-    dialog.run();
-    dismiss_dialog(&dialog);
+    dialog.present();
 }
 /// Logical preview bounds; the card is drawn at the display's device scale for sharpness.
 const PREVIEW_WIDTH: f64 = 560.0;
@@ -966,19 +1009,21 @@ fn rounded_rectangle(context: &gtk::cairo::Context, width: f64, height: f64, rad
     context.close_path();
 }
 
+/// Builds a fresh pending photo without showing it; the controller replaces the
+/// previous dialog only after construction succeeds and Capture was accepted.
 #[allow(deprecated)] // Match the GLib version provided by GTK 3.
-fn save_screenshot(
+fn screenshot_dialog(
     parent: &gtk::ApplicationWindow,
     image: &Pixbuf,
     folder: &std::path::Path,
     completed: impl FnOnce(Result<Option<(PathBuf, usize)>>) + 'static,
-) {
+) -> Option<gtk::Dialog> {
     // The file name carries the moment of capture rather than the moment Save is pressed.
     let stamp = match files::stamp() {
         Ok(stamp) => stamp,
         Err(error) => {
             completed(Err(error));
-            return;
+            return None;
         }
     };
     // Nonmodal, so Print Screen can start another capture while this image waits.
@@ -1050,6 +1095,10 @@ fn save_screenshot(
     profile.set_margin_top(8);
     settings_row(&dialog, &labels, tr("Format"), &profile);
     let destination = folder_setting(&dialog, &labels, tr("Images"), tr("Folder"), folder, None);
+    // A folder chooser for an older screenshot must not block recording controls.
+    let export_windows = gtk::WindowGroup::new();
+    export_windows.add_window(&dialog);
+    export_windows.add_window(&destination.1);
     let snapshot = crate::image_export::Snapshot::new(image);
     let encoded = Rc::new(RefCell::new(Vec::<u8>::new()));
     let generation = Rc::new(Cell::new(0u64));
@@ -1158,10 +1207,7 @@ fn save_screenshot(
             completed(result);
         });
     });
-    dialog.show_all();
-    // Older unsaved captures stay open. Explicitly focus the new dialog after
-    // the selector closes so the window manager cannot leave an older preview on top.
-    dialog.present();
+    Some(dialog)
 }
 
 /// Releases a completed dialog after callers have collected all widget state.
