@@ -24,11 +24,11 @@ Press **Print Screen**, select the screen or an area, and capture.
 
 Download **one** package for your distribution from [GitHub Releases](https://github.com/NullMagic2/Snappy/releases):
 
-| Distribution | Package |
+| **Distribution** | **Package** |
 | --- | --- |
-| Ubuntu 24.04+ | `snappy-capture_0.1.0-11ubuntu1_amd64.deb` |
-| Linux Mint 22+ | `snappy-capture_0.1.0-11mint1_amd64.deb` |
-| Debian 13+ | `snappy-capture_0.1.0-11debian1_amd64.deb` |
+| Ubuntu 24.04+ | `snappy-capture_0.1.0-32ubuntu1_amd64.deb` |
+| Linux Mint 22+ | `snappy-capture_0.1.0-32mint1_amd64.deb` |
+| Debian 13+ | `snappy-capture_0.1.0-32debian1_amd64.deb` |
 
 These packages are for **64-bit Intel/AMD (amd64)** systems. They contain the same
 application, with distribution-specific package descriptions and preferred portal
@@ -37,7 +37,7 @@ backends. They are alternative installations of the same package, not separate a
 Open a terminal in the download directory and install the matching file, for example:
 
 ```sh
-sudo apt install ./snappy-capture_0.1.0-11ubuntu1_amd64.deb
+sudo apt install ./snappy-capture_0.1.0-32ubuntu1_amd64.deb
 ```
 
 Open **Snappy** from the application menu once to complete desktop integration.

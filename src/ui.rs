@@ -950,7 +950,7 @@ const PREVIEW_HEIGHT: f64 = 320.0;
 const PREVIEW_RADIUS: f64 = 6.0;
 
 /// The screenshot as a rounded card with a shadow and a native-size badge, on a tinted backdrop.
-fn preview_card(image: &Pixbuf) -> gtk::Box {
+fn preview_card(image: &Pixbuf, dialog: &gtk::Dialog) -> gtk::Box {
     let scale = (PREVIEW_WIDTH / f64::from(image.width()))
         .min(PREVIEW_HEIGHT / f64::from(image.height()))
         .min(1.0);
@@ -958,6 +958,27 @@ fn preview_card(image: &Pixbuf) -> gtk::Box {
     let height = (f64::from(image.height()) * scale).round().max(1.0) as i32;
     let canvas = gtk::DrawingArea::new();
     canvas.set_size_request(width, height);
+    if let Some(accessible) = canvas.accessible() {
+        accessible.set_name(tr("Screenshot preview"));
+    }
+    let menu = gtk::Menu::builder().attach_widget(&canvas).build();
+    let copy = gtk::MenuItem::with_label(tr("Copy"));
+    let parent = dialog.downgrade();
+    copy.connect_activate(move |_| {
+        if let Some(dialog) = parent.upgrade() {
+            dialog.response(gtk::ResponseType::Apply);
+        }
+    });
+    menu.append(&copy);
+    menu.show_all();
+    canvas.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+    canvas.connect_button_press_event(move |_, event| {
+        if event.button() == 3 {
+            menu.popup_at_pointer(Some(event));
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
     let source = image.clone();
     // Scaled once per device scale factor, not on every expose.
     let scaled: RefCell<Option<(i32, Pixbuf)>> = RefCell::new(None);
@@ -1080,7 +1101,7 @@ fn screenshot_dialog(
     dialog.content_area().pack_start(&name_row, false, false, 0);
     dialog
         .content_area()
-        .pack_start(&preview_card(image), false, false, 0);
+        .pack_start(&preview_card(image, &dialog), false, false, 0);
     let labels = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
     let profile = gtk::ComboBoxText::new();
     for text in [
@@ -1265,14 +1286,14 @@ fn child_dialog_button(
 enum PackResult {
     SharedAvailable(bool),
     Authorizing,
-    Installed(Result<()>),
+    Changed(crate::ocr_packs::Action, Result<()>),
 }
 
 /// A scoped pack manager lives under Settings. Workers never request root access
 /// for local installs, and closing Settings cancels any unfinished download.
 #[allow(deprecated)]
 fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
-    use crate::ocr_packs::{self, Pack, Scope};
+    use crate::ocr_packs::{self, Action, Pack, Scope};
     use std::sync::{Arc, atomic::AtomicBool};
     let dialog = gtk::Dialog::with_buttons(
         Some(tr("OCR language packs")),
@@ -1282,7 +1303,7 @@ fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
     );
     center_dialog(&dialog, parent);
     dialog.set_destroy_with_parent(true);
-    dialog.set_resizable(false);
+    dialog.set_default_size(620, 480);
     let content = dialog.content_area();
     content.set_border_width(18);
     content.set_spacing(12);
@@ -1296,22 +1317,57 @@ fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
     }
     settings_row(&dialog, &labels, tr("Install for"), &scope);
     scope.set_tooltip_text(Some(tr("Language packs are stored separately for Snappy")));
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some(tr("Search languages…")));
+    if let Some(accessible) = search.accessible() {
+        accessible.set_name(tr("Search languages"));
+    }
+    content.pack_start(&search, false, false, 0);
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    let empty = gtk::Label::new(Some(tr("No languages found")));
+    empty.show();
+    list.set_placeholder(Some(&empty));
+    let query = search.downgrade();
+    list.set_filter_func(Some(Box::new(move |row| {
+        let query = query
+            .upgrade()
+            .map(|entry| entry.text().to_lowercase())
+            .unwrap_or_default();
+        let code = row.widget_name();
+        Pack::find(&code).is_some_and(|pack| pack.matches(query.trim()))
+    })));
+    let filtered = list.downgrade();
+    search.connect_search_changed(move |_| {
+        if let Some(list) = filtered.upgrade() {
+            list.invalidate_filter();
+        }
+    });
+    let scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(240);
+    scroll.set_shadow_type(gtk::ShadowType::In);
+    scroll.add(&list);
+    content.pack_start(&scroll, true, true, 0);
     let mut rows = Vec::new();
-    for pack in Pack::ALL {
+    for &pack in Pack::ALL {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_border_width(10);
+        let name = gtk::Label::new(Some(&format!("{} · {}", pack.name(), pack.code)));
+        name.set_xalign(0.0);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         let status = gtk::Label::new(None);
         status.set_xalign(0.0);
         status.style_context().add_class("dim-label");
-        let install = gtk::Button::with_label(tr("Install"));
-        row.pack_start(&status, true, true, 0);
-        row.pack_end(&install, false, false, 0);
-        let title = if pack.language == i18n::Language::PortugueseBrazil {
-            tr("Portuguese (Brazil / Portugal)")
-        } else {
-            pack.language.name()
-        };
-        settings_row(&dialog, &labels, title, &row);
-        rows.push((pack, status, install));
+        let action = gtk::Button::with_label(tr("Install"));
+        row.pack_start(&name, true, true, 0);
+        row.pack_start(&status, false, false, 0);
+        row.pack_end(&action, false, false, 0);
+        let item = gtk::ListBoxRow::new();
+        item.set_widget_name(pack.code);
+        item.add(&row);
+        list.add(&item);
+        rows.push((pack, status, action));
     }
     let progress = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     let spinner = gtk::Spinner::new();
@@ -1358,7 +1414,8 @@ fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
                 });
             }
             if let Some(button) = button.upgrade() {
-                button.set_sensitive(!busy && !present && shared_available);
+                button.set_label(if present { tr("Remove") } else { tr("Install") });
+                button.set_sensitive(!busy && shared_available);
                 button.set_tooltip_text(if shared_available {
                     None
                 } else {
@@ -1388,17 +1445,25 @@ fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
             } else {
                 Scope::Local
             };
+            let action = if ocr_packs::installed(pack, target) {
+                Action::Remove
+            } else {
+                Action::Install
+            };
             let cancelled = Arc::new(AtomicBool::new(false));
             active.replace(Some(cancelled.clone()));
             refresh();
-            status.set_text(tr("Downloading language pack…"));
+            status.set_text(match action {
+                Action::Install => tr("Downloading language pack…"),
+                Action::Remove => tr("Removing language pack…"),
+            });
             spinner.start();
             let sender = sender.clone();
             std::thread::spawn(move || {
-                let result = ocr_packs::install(pack, target, &cancelled, || {
+                let result = ocr_packs::change(pack, target, action, &cancelled, || {
                     let _ = sender.send(PackResult::Authorizing);
                 });
-                let _ = sender.send(PackResult::Installed(result));
+                let _ = sender.send(PackResult::Changed(action, result));
             });
         });
     }
@@ -1411,11 +1476,14 @@ fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
                 refresh();
             }
             PackResult::Authorizing => status.set_text(tr("Waiting for administrator approval…")),
-            PackResult::Installed(result) => {
+            PackResult::Changed(action, result) => {
                 finished.take();
                 spinner.stop();
                 match result {
-                    Ok(()) => status.set_text(tr("Language pack installed")),
+                    Ok(()) => status.set_text(match action {
+                        Action::Install => tr("Language pack installed"),
+                        Action::Remove => tr("Language pack removed"),
+                    }),
                     Err(error) => status.set_text(&i18n::error(&error)),
                 }
                 refresh();
@@ -1424,7 +1492,7 @@ fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
         glib::ControlFlow::Continue
     });
     std::thread::spawn(move || {
-        let _ = sender.send(PackResult::SharedAvailable(ocr_packs::can_install_system()));
+        let _ = sender.send(PackResult::SharedAvailable(ocr_packs::can_manage_system()));
     });
     cancel_job_on_close(&dialog, active, updates);
     dialog.connect_response(|dialog, _| {
@@ -1457,7 +1525,7 @@ fn cancel_job_on_close(
 }
 
 enum TextResult {
-    Languages(Result<Vec<i18n::Language>>),
+    Languages(Result<crate::ocr::Models>),
     Recognized(u64, Result<String>),
 }
 
@@ -1530,6 +1598,7 @@ fn text_dialog(
         }
     });
     let active = Rc::new(RefCell::new(None::<Arc<AtomicBool>>));
+    let models = Rc::new(RefCell::new(None::<crate::ocr::Models>));
     let generation = Rc::new(Cell::new(0u64));
     let (sender, receiver) = glib::MainContext::channel(glib::Priority::DEFAULT);
     let job = active.clone();
@@ -1539,8 +1608,12 @@ fn text_dialog(
     let pending_buffer = buffer.clone();
     let worker_sender = sender.clone();
     let worker_engine = engine.clone();
+    let worker_models = models.clone();
     languages.connect_changed(move |combo| {
         let Some(code) = combo.active_id() else {
+            return;
+        };
+        let Some(models) = worker_models.borrow().clone() else {
             return;
         };
         if let Some(previous) = job.borrow_mut().take() {
@@ -1556,9 +1629,9 @@ fn text_dialog(
         let engine = worker_engine.clone();
         let snapshot = snapshot.clone();
         let sender = worker_sender.clone();
-        let language = i18n::Language::from_code(&code);
+        let language = (code != "auto").then(|| code.to_string());
         std::thread::spawn(move || {
-            let result = engine.recognize(snapshot, language, &cancelled);
+            let result = engine.recognize(snapshot, &models, language.as_deref(), &cancelled);
             let _ = sender.send(TextResult::Recognized(current, result));
         });
     });
@@ -1566,16 +1639,17 @@ fn text_dialog(
         TextResult::Languages(result) => {
             spinner.stop();
             match result {
-                Ok(available) if !available.is_empty() => {
-                    for language in &available {
-                        languages.append(Some(language.code()), language.name());
+                Ok(available) if available.languages().next().is_some() => {
+                    languages.append(Some("auto"), tr("Automatic"));
+                    for language in available.languages() {
+                        let title = crate::ocr_packs::Pack::find(language)
+                            .map(|pack| pack.name())
+                            .unwrap_or(language);
+                        languages.append(Some(language), title);
                     }
-                    let initial = available
-                        .iter()
-                        .find(|language| **language == i18n::language())
-                        .unwrap_or(&available[0]);
+                    models.replace(Some(available));
                     languages.set_sensitive(true);
-                    languages.set_active_id(Some(initial.code()));
+                    languages.set_active_id(Some("auto"));
                 }
                 Ok(_) => status.set_text(tr("No supported OCR languages installed")),
                 Err(error) => status.set_text(&i18n::error(&error)),
@@ -1604,7 +1678,7 @@ fn text_dialog(
     active.replace(Some(cancelled.clone()));
     let engine = engine.clone();
     std::thread::spawn(move || {
-        let _ = sender.send(TextResult::Languages(engine.languages(&cancelled)));
+        let _ = sender.send(TextResult::Languages(engine.models(&cancelled)));
     });
     cancel_job_on_close(&dialog, active, updates);
     let buffer = text.buffer().expect("TextView owns a buffer");

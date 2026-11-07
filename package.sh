@@ -5,7 +5,7 @@
 set -euo pipefail
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 cd -- "$project_root"
-release=30
+release=32
 case "${1:-all}" in
     all) targets='ubuntu mint debian' ;;
     ubuntu|mint|debian) targets=$1 ;;
@@ -42,6 +42,7 @@ install -Dm755 packaging/launch "$stage/usr/lib/snappy/launch"
 install -Dm644 packaging/io.github.snappy.Capture.desktop "$stage/usr/share/applications/io.github.snappy.Capture.desktop"
 install -Dm644 packaging/snappy-setup.desktop "$stage/etc/xdg/autostart/snappy-setup.desktop"
 install -Dm644 packaging/copyright "$stage/usr/share/doc/snappy-capture/copyright"
+install -Dm644 assets/ocr-catalog-license.txt "$stage/usr/share/doc/snappy-capture/ocr-catalog-license.txt"
 install -Dm644 assets/ocr-models-license.txt "$stage/usr/share/doc/snappy-capture/ocr-models-license.txt"
 icon_dir=$stage/usr/share/icons/hicolor/512x512/apps
 mkdir -p "$icon_dir"

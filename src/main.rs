@@ -38,9 +38,17 @@ fn session_uses_wayland(session: Option<&str>, display: Option<&str>) -> bool {
 
 fn main() -> glib::ExitCode {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
-    if arguments.first().map(String::as_str) == Some("--install-ocr-pack") {
+    if matches!(
+        arguments.first().map(String::as_str),
+        Some("--install-ocr-pack" | "--remove-ocr-pack")
+    ) {
+        let action = if arguments[0] == "--install-ocr-pack" {
+            ocr_packs::Action::Install
+        } else {
+            ocr_packs::Action::Remove
+        };
         let result = match arguments.as_slice() {
-            [_, code] => ocr_packs::install_system_from_stdin(code),
+            [_, code] => ocr_packs::change_system_from_stdin(code, action),
             _ => Err("Expected one OCR language code".into()),
         };
         return match result {
@@ -57,7 +65,7 @@ fn main() -> glib::ExitCode {
     }
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "Snappy\n\nUsage: snappy [--capture | --install [--autostart] [--no-default] | --restore-shortcuts | --install-integration | --version | --help]\n\n--capture  Open the capture controls.\n--install  Install launcher/icons and assign Print Screen to Snappy (GNOME/Cinnamon).\n--no-default  Install without changing keyboard shortcuts.\n--restore-shortcuts  Restore keyboard preferences saved during installation.\nUse Settings to quit. Recording continues until Stop is pressed. PNG, JPEG, BMP or GIF screenshots and MP4 or MKV recordings.\n--install-ocr-pack MODEL  Install a verified Snappy language pack from stdin (administrator).\nRequires a graphical session; Wayland uses desktop portals."
+            "Snappy\n\nUsage: snappy [--capture | --install [--autostart] [--no-default] | --restore-shortcuts | --install-integration | --version | --help]\n\n--capture  Open the capture controls.\n--install  Install launcher/icons and assign Print Screen to Snappy (GNOME/Cinnamon).\n--no-default  Install without changing keyboard shortcuts.\n--restore-shortcuts  Restore keyboard preferences saved during installation.\nUse Settings to quit. Recording continues until Stop is pressed. PNG, JPEG, BMP or GIF screenshots and MP4 or MKV recordings.\n--install-ocr-pack MODEL  Install a verified Snappy language pack from stdin (administrator).\n--remove-ocr-pack MODEL  Remove a Snappy language pack (administrator).\nRequires a graphical session; Wayland uses desktop portals."
         );
         return glib::ExitCode::SUCCESS;
     }

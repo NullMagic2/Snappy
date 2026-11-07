@@ -28,3 +28,10 @@ License: Apache-2.0
  The full license is included in ocr-models-license.txt. It accompanies optional
  language models downloaded from the Tesseract OCR project's tessdata_fast
  repository. Model files are not bundled in this package.
+
+Files: src/ocr_catalog.rs assets/ocr-catalog-license.txt
+Copyright: 2007-2011 Edgewall Software; 2007-2022 the Babel Team
+License: BSD-3-clause
+ Localized language names use Babel/CLDR data. The complete notice is included
+ in ocr-catalog-license.txt. Model sizes and checksums identify upstream
+ tessdata_fast files; models are downloaded separately under Apache-2.0.
