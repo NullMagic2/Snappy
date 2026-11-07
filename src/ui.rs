@@ -691,6 +691,11 @@ impl Controller {
         let copy = update.clone();
         let sound_handler = sound.connect_active_notify(move |_| copy());
         settings_row(&dialog, &labels, tr("Estimated size"), &estimate);
+        let packs = gtk::Button::with_label(tr("Manage…"));
+        child_dialog_button(&packs, &dialog, |parent| {
+            Some(language_packs_dialog(parent))
+        });
+        settings_row(&dialog, &labels, tr("OCR language packs"), &packs);
         let shortcut = gtk::Label::new(Some(&self.shortcut_status.borrow().label()));
         shortcut.set_selectable(true);
         shortcut.set_line_wrap(true);
@@ -764,9 +769,7 @@ impl Controller {
         center_dialog(&dialog, &self.owner);
         dialog.connect_response(move |dialog, response| {
             if response == gtk::ResponseType::Apply {
-                let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-                clipboard.set_text(&message);
-                clipboard.store();
+                copy_text(&message);
                 copy.set_tooltip_text(Some(tr("Copied")));
                 return;
             }
@@ -1100,6 +1103,7 @@ fn screenshot_dialog(
     export_windows.add_window(&dialog);
     export_windows.add_window(&destination.1);
     let snapshot = crate::image_export::Snapshot::new(image);
+    name_row.pack_end(&text_action(&dialog, &snapshot), false, false, 0);
     let encoded = Rc::new(RefCell::new(Vec::<u8>::new()));
     let generation = Rc::new(Cell::new(0u64));
     let (sender, receiver) = glib::MainContext::channel(glib::Priority::DEFAULT);
@@ -1163,15 +1167,7 @@ fn screenshot_dialog(
             let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
             clipboard.set_image(&image);
             clipboard.store();
-            let button = dialog
-                .widget_for_response(gtk::ResponseType::Apply)
-                .and_then(|widget| widget.downcast::<gtk::Button>().ok());
-            if let Some(button) = button {
-                button.set_label(tr("Copied"));
-                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
-                    button.set_label(tr("Copy"));
-                });
-            }
+            copied_feedback(dialog, "Copy");
             return;
         }
         let Some(completed) = completed.borrow_mut().take() else {
@@ -1208,6 +1204,444 @@ fn screenshot_dialog(
         });
     });
     Some(dialog)
+}
+
+/// Text extraction owns a child dialog tied to this immutable screenshot. A newer
+/// capture closes it through the export dialog's normal cancellation path.
+fn text_action(parent: &gtk::Dialog, snapshot: &crate::image_export::Snapshot) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(Some("insert-text-symbolic"), gtk::IconSize::Button);
+    let engine = crate::ocr::Engine::find();
+    button.set_sensitive(engine.is_some());
+    button.set_tooltip_text(Some(if engine.is_some() {
+        tr("Extract text")
+    } else {
+        tr("Tesseract is not installed")
+    }));
+    if let Some(accessible) = button.accessible() {
+        accessible.set_name(tr("Extract text"));
+    }
+    let snapshot = snapshot.clone();
+    child_dialog_button(&button, parent, move |parent| {
+        engine
+            .as_ref()
+            .map(|engine| text_dialog(parent, engine, snapshot.clone()))
+    });
+    button
+}
+
+/// Reuse one transient child and close it when its parent completes or is replaced.
+fn child_dialog_button(
+    button: &gtk::Button,
+    parent: &gtk::Dialog,
+    create: impl Fn(&gtk::Dialog) -> Option<gtk::Dialog> + 'static,
+) {
+    let child = Rc::new(glib::WeakRef::<gtk::Dialog>::new());
+    let open_child = child.clone();
+    let owner = parent.downgrade();
+    button.connect_clicked(move |_| {
+        let Some(parent) = owner.upgrade() else {
+            return;
+        };
+        if let Some(dialog) = open_child.upgrade().filter(|dialog| dialog.is_visible()) {
+            dialog.present();
+            return;
+        }
+        let Some(dialog) = create(&parent) else {
+            return;
+        };
+        open_child.set(Some(&dialog));
+        dialog.show_all();
+        dialog.present();
+    });
+    parent.connect_response(move |_, response| {
+        if response != gtk::ResponseType::Apply {
+            if let Some(child) = child.upgrade() {
+                child.response(gtk::ResponseType::Close);
+            }
+        }
+    });
+}
+
+enum PackResult {
+    SharedAvailable(bool),
+    Authorizing,
+    Installed(Result<()>),
+}
+
+/// A scoped pack manager lives under Settings. Workers never request root access
+/// for local installs, and closing Settings cancels any unfinished download.
+#[allow(deprecated)]
+fn language_packs_dialog(parent: &gtk::Dialog) -> gtk::Dialog {
+    use crate::ocr_packs::{self, Pack, Scope};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let dialog = gtk::Dialog::with_buttons(
+        Some(tr("OCR language packs")),
+        Some(parent),
+        gtk::DialogFlags::MODAL,
+        &[(tr("Close"), gtk::ResponseType::Close)],
+    );
+    center_dialog(&dialog, parent);
+    dialog.set_destroy_with_parent(true);
+    dialog.set_resizable(false);
+    let content = dialog.content_area();
+    content.set_border_width(18);
+    content.set_spacing(12);
+    let labels = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+    let scope = gtk::ComboBoxText::new();
+    scope.append_text(tr("Only me"));
+    scope.append_text(tr("All users (administrator required)"));
+    scope.set_active(Some(0));
+    if let Some(accessible) = scope.accessible() {
+        accessible.set_name(tr("Install for"));
+    }
+    settings_row(&dialog, &labels, tr("Install for"), &scope);
+    scope.set_tooltip_text(Some(tr("Language packs are stored separately for Snappy")));
+    let mut rows = Vec::new();
+    for pack in Pack::ALL {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let status = gtk::Label::new(None);
+        status.set_xalign(0.0);
+        status.style_context().add_class("dim-label");
+        let install = gtk::Button::with_label(tr("Install"));
+        row.pack_start(&status, true, true, 0);
+        row.pack_end(&install, false, false, 0);
+        let title = if pack.language == i18n::Language::PortugueseBrazil {
+            tr("Portuguese (Brazil / Portugal)")
+        } else {
+            pack.language.name()
+        };
+        settings_row(&dialog, &labels, title, &row);
+        rows.push((pack, status, install));
+    }
+    let progress = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let spinner = gtk::Spinner::new();
+    let status = gtk::Label::new(if crate::ocr::Engine::find().is_none() {
+        Some(tr("Tesseract is not installed"))
+    } else {
+        None
+    });
+    status.set_xalign(0.0);
+    status.set_line_wrap(true);
+    status.set_max_width_chars(55);
+    status.set_selectable(true);
+    progress.pack_start(&spinner, false, false, 0);
+    progress.pack_start(&status, true, true, 0);
+    content.pack_start(&progress, false, false, 0);
+    let active = Rc::new(RefCell::new(None::<Arc<AtomicBool>>));
+    let shared_available = Rc::new(Cell::new(false));
+    let shared_ready = shared_available.clone();
+    let weak_scope = scope.downgrade();
+    let refresh_rows: Vec<_> = rows
+        .iter()
+        .map(|(pack, status, button)| (*pack, status.downgrade(), button.downgrade()))
+        .collect();
+    let job = active.clone();
+    let refresh = Rc::new(move || {
+        let Some(scope) = weak_scope.upgrade() else {
+            return;
+        };
+        let target = if scope.active() == Some(1) {
+            Scope::System
+        } else {
+            Scope::Local
+        };
+        let busy = job.borrow().is_some();
+        scope.set_sensitive(!busy);
+        for (pack, label, button) in &refresh_rows {
+            let present = ocr_packs::installed(*pack, target);
+            let shared_available = target == Scope::Local || shared_ready.get();
+            if let Some(label) = label.upgrade() {
+                label.set_text(if present {
+                    tr("Installed")
+                } else {
+                    tr("Not installed")
+                });
+            }
+            if let Some(button) = button.upgrade() {
+                button.set_sensitive(!busy && !present && shared_available);
+                button.set_tooltip_text(if shared_available {
+                    None
+                } else {
+                    Some(tr(
+                        "Install the Snappy package to enable system-wide language packs",
+                    ))
+                });
+            }
+        }
+    });
+    let update = refresh.clone();
+    scope.connect_changed(move |_| update());
+    let (sender, receiver) = glib::MainContext::channel(glib::Priority::DEFAULT);
+    for (pack, _, button) in rows {
+        let scope = scope.clone();
+        let active = active.clone();
+        let refresh = refresh.clone();
+        let status = status.clone();
+        let spinner = spinner.clone();
+        let sender = sender.clone();
+        button.connect_clicked(move |_| {
+            if active.borrow().is_some() {
+                return;
+            }
+            let target = if scope.active() == Some(1) {
+                Scope::System
+            } else {
+                Scope::Local
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            active.replace(Some(cancelled.clone()));
+            refresh();
+            status.set_text(tr("Downloading language pack…"));
+            spinner.start();
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                let result = ocr_packs::install(pack, target, &cancelled, || {
+                    let _ = sender.send(PackResult::Authorizing);
+                });
+                let _ = sender.send(PackResult::Installed(result));
+            });
+        });
+    }
+    refresh();
+    let finished = active.clone();
+    let updates = receiver.attach(None, move |result| {
+        match result {
+            PackResult::SharedAvailable(available) => {
+                shared_available.set(available);
+                refresh();
+            }
+            PackResult::Authorizing => status.set_text(tr("Waiting for administrator approval…")),
+            PackResult::Installed(result) => {
+                finished.take();
+                spinner.stop();
+                match result {
+                    Ok(()) => status.set_text(tr("Language pack installed")),
+                    Err(error) => status.set_text(&i18n::error(&error)),
+                }
+                refresh();
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+    std::thread::spawn(move || {
+        let _ = sender.send(PackResult::SharedAvailable(ocr_packs::can_install_system()));
+    });
+    cancel_job_on_close(&dialog, active, updates);
+    dialog.connect_response(|dialog, _| {
+        dialog.hide();
+        let dialog = dialog.clone();
+        glib::idle_add_local_once(move || dismiss_dialog(&dialog));
+    });
+    dialog
+}
+
+/// Disconnect result delivery and reap a worker's child when either a user closes
+/// the dialog or its owning screenshot/Settings window is destroyed.
+fn cancel_job_on_close(
+    dialog: &gtk::Dialog,
+    active: Rc<RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>>,
+    updates: glib::SourceId,
+) {
+    let updates = RefCell::new(Some(updates));
+    let cleanup = Rc::new(move || {
+        if let Some(job) = active.borrow_mut().take() {
+            job.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(updates) = updates.borrow_mut().take() {
+            updates.remove();
+        }
+    });
+    let hide_cleanup = cleanup.clone();
+    dialog.connect_hide(move |_| hide_cleanup());
+    dialog.connect_destroy(move |_| cleanup());
+}
+
+enum TextResult {
+    Languages(Result<Vec<i18n::Language>>),
+    Recognized(u64, Result<String>),
+}
+
+/// Recognition and model discovery run on workers. Their channel is removed when
+/// this nonmodal dialog closes, so late results cannot reach a newer screenshot.
+#[allow(deprecated)] // Match the GLib version provided by GTK 3.
+fn text_dialog(
+    parent: &gtk::Dialog,
+    engine: &crate::ocr::Engine,
+    snapshot: crate::image_export::Snapshot,
+) -> gtk::Dialog {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let dialog = gtk::Dialog::with_buttons(
+        Some(tr("Extract text")),
+        Some(parent),
+        gtk::DialogFlags::empty(),
+        &[
+            (tr("Close"), gtk::ResponseType::Close),
+            (tr("Copy text"), gtk::ResponseType::Apply),
+        ],
+    );
+    center_dialog(&dialog, parent);
+    dialog.set_destroy_with_parent(true);
+    dialog.set_default_size(600, 400);
+    dialog.set_response_sensitive(gtk::ResponseType::Apply, false);
+    if let Some(group) = parent.group() {
+        group.add_window(&dialog);
+    }
+    let content = dialog.content_area();
+    content.set_border_width(18);
+    content.set_spacing(12);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let languages = gtk::ComboBoxText::new();
+    languages.set_sensitive(false);
+    if let Some(accessible) = languages.accessible() {
+        accessible.set_name(tr("Language"));
+    }
+    let spinner = gtk::Spinner::new();
+    spinner.start();
+    row.pack_start(&gtk::Label::new(Some(tr("Language"))), false, false, 0);
+    row.pack_start(&languages, true, true, 0);
+    row.pack_start(&spinner, false, false, 0);
+    content.pack_start(&row, false, false, 0);
+    let status = gtk::Label::new(Some(tr("Reading OCR languages…")));
+    status.set_xalign(0.0);
+    status.set_line_wrap(true);
+    status.set_max_width_chars(60);
+    status.set_selectable(true);
+    content.pack_start(&status, false, false, 0);
+    let text = gtk::TextView::new();
+    text.set_wrap_mode(gtk::WrapMode::WordChar);
+    if let Some(accessible) = text.accessible() {
+        accessible.set_name(tr("Recognized text"));
+    }
+    let scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    scroll.set_shadow_type(gtk::ShadowType::In);
+    scroll.add(&text);
+    content.pack_start(&scroll, true, true, 0);
+    let buffer = text.buffer().expect("TextView owns a buffer");
+    let copy = dialog.downgrade();
+    buffer.connect_changed(move |buffer| {
+        if let Some(dialog) = copy.upgrade() {
+            let value = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .unwrap_or_default();
+            dialog.set_response_sensitive(gtk::ResponseType::Apply, !value.trim().is_empty());
+        }
+    });
+    let active = Rc::new(RefCell::new(None::<Arc<AtomicBool>>));
+    let generation = Rc::new(Cell::new(0u64));
+    let (sender, receiver) = glib::MainContext::channel(glib::Priority::DEFAULT);
+    let job = active.clone();
+    let revision = generation.clone();
+    let pending_status = status.clone();
+    let pending_spinner = spinner.clone();
+    let pending_buffer = buffer.clone();
+    let worker_sender = sender.clone();
+    let worker_engine = engine.clone();
+    languages.connect_changed(move |combo| {
+        let Some(code) = combo.active_id() else {
+            return;
+        };
+        if let Some(previous) = job.borrow_mut().take() {
+            previous.store(true, Ordering::Relaxed);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        job.replace(Some(cancelled.clone()));
+        let current = revision.get() + 1;
+        revision.set(current);
+        pending_buffer.set_text("");
+        pending_status.set_text(tr("Recognizing text…"));
+        pending_spinner.start();
+        let engine = worker_engine.clone();
+        let snapshot = snapshot.clone();
+        let sender = worker_sender.clone();
+        let language = i18n::Language::from_code(&code);
+        std::thread::spawn(move || {
+            let result = engine.recognize(snapshot, language, &cancelled);
+            let _ = sender.send(TextResult::Recognized(current, result));
+        });
+    });
+    let updates = receiver.attach(None, move |result| match result {
+        TextResult::Languages(result) => {
+            spinner.stop();
+            match result {
+                Ok(available) if !available.is_empty() => {
+                    for language in &available {
+                        languages.append(Some(language.code()), language.name());
+                    }
+                    let initial = available
+                        .iter()
+                        .find(|language| **language == i18n::language())
+                        .unwrap_or(&available[0]);
+                    languages.set_sensitive(true);
+                    languages.set_active_id(Some(initial.code()));
+                }
+                Ok(_) => status.set_text(tr("No supported OCR languages installed")),
+                Err(error) => status.set_text(&i18n::error(&error)),
+            }
+            glib::ControlFlow::Continue
+        }
+        TextResult::Recognized(revision, result) => {
+            if revision == generation.get() {
+                spinner.stop();
+                match result {
+                    Ok(value) => {
+                        status.set_text(if value.is_empty() {
+                            tr("No text found")
+                        } else {
+                            ""
+                        });
+                        buffer.set_text(&value);
+                    }
+                    Err(error) => status.set_text(&i18n::error(&error)),
+                }
+            }
+            glib::ControlFlow::Continue
+        }
+    });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    active.replace(Some(cancelled.clone()));
+    let engine = engine.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(TextResult::Languages(engine.languages(&cancelled)));
+    });
+    cancel_job_on_close(&dialog, active, updates);
+    let buffer = text.buffer().expect("TextView owns a buffer");
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Apply {
+            let value = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .unwrap_or_default();
+            if !value.trim().is_empty() {
+                copy_text(&value);
+                copied_feedback(dialog, "Copy text");
+            }
+            return;
+        }
+        dialog.hide();
+        let dialog = dialog.clone();
+        glib::idle_add_local_once(move || dismiss_dialog(&dialog));
+    });
+    dialog
+}
+
+fn copy_text(text: &str) {
+    let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+    clipboard.set_text(text);
+    clipboard.store();
+}
+
+fn copied_feedback(dialog: &gtk::Dialog, original: &'static str) {
+    if let Some(button) = dialog
+        .widget_for_response(gtk::ResponseType::Apply)
+        .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+    {
+        button.set_label(tr("Copied"));
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+            button.set_label(tr(original));
+        });
+    }
 }
 
 /// Releases a completed dialog after callers have collected all widget state.

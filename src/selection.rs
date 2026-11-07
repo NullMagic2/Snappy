@@ -8,10 +8,6 @@ use std::{cell::Cell, rc::Rc};
 #[derive(Clone, Copy)]
 enum Drag {
     New((f64, f64)),
-    Move {
-        anchor: (f64, f64),
-        original: Area,
-    },
     Resize {
         original: Area,
         left: bool,
@@ -30,7 +26,7 @@ pub struct Choice {
     pub select_region: bool,
 }
 
-/// Places a draggable, resizable selection and capture controls directly over the desktop.
+/// Starts a fresh selection over the desktop; Selection can recall the previous area.
 /// Coordinates returned to the backend remain in native capture pixels.
 pub fn choose(
     parent: &gtk::ApplicationWindow,
@@ -38,7 +34,7 @@ pub fn choose(
     video: bool,
     sound: bool,
     show_pointer: bool,
-    selection: Option<Area>,
+    remembered_area: Option<Area>,
     select_region: bool,
     settings: impl Fn(&gtk::Dialog, bool) -> bool + 'static,
     language_changed: impl Fn(Language) + 'static,
@@ -114,8 +110,8 @@ pub fn choose(
     region.set_mode(false);
     let screen = gtk::RadioButton::with_label_from_widget(&region, tr("Screen"));
     screen.set_mode(false);
-    screen.set_active(!select_region || selection.is_none());
-    region.set_active(select_region && selection.is_some());
+    screen.set_active(!select_region);
+    region.set_active(select_region);
     targets.pack_start(&region, false, false, 0);
     targets.pack_start(&screen, false, false, 0);
     // Shows only a live selection size; the mode buttons already say the rest.
@@ -154,7 +150,7 @@ pub fn choose(
     }
     let accept = gtk::Button::with_label(if video { tr("Record") } else { tr("Capture") });
     accept.style_context().add_class("suggested-action");
-    update_controls(&dimensions, &accept, selection, region.is_active());
+    update_controls(&dimensions, &accept, None, region.is_active());
     for widget in [
         cancel.upcast_ref::<gtk::Widget>(),
         modes.upcast_ref(),
@@ -231,7 +227,9 @@ pub fn choose(
         });
     });
 
-    let selected = Rc::new(Cell::new(selection));
+    // Remembered geometry is available only through an explicit Selection click;
+    // opening Print Screen must not expose or hit-test the previous rectangle.
+    let selected = Rc::new(Cell::new(None::<Area>));
     {
         let photo = photo.clone();
         let movie = movie.clone();
@@ -353,13 +351,24 @@ pub fn choose(
     let pressing = drag.clone();
     let drag_mode = region.clone();
     let drag_toolbar = toolbar.clone();
+    let size_label = dimensions.clone();
+    let capture_button = accept.clone();
     canvas.connect_button_press_event(move |canvas, event| {
         if event.button() == 1 {
-            drag_mode.set_active(true);
             let point = native_point(canvas, event.position(), width, height);
             let tolerance = 10.0 / transform(canvas, width, height).0;
-            pressing.set(Some(start_drag(selection.get(), point, tolerance)));
-            // Keep the entire desktop available while drawing, moving or resizing.
+            let visible = selection.get().filter(|_| drag_mode.is_active());
+            let gesture = start_drag(visible, point, tolerance);
+            pressing.set(Some(gesture));
+            // GTK can emit clicked when set_active changes a radio button. Clear
+            // a fresh snip afterwards so that cannot recall the old area mid-drag.
+            drag_mode.set_active(true);
+            if matches!(gesture, Drag::New(_)) {
+                let previous = selection.take();
+                update_controls(&size_label, &capture_button, None, true);
+                redraw_selection(canvas, previous, None, width, height);
+            }
+            // Keep the entire desktop available while drawing or resizing.
             drag_toolbar.hide();
         }
         glib::Propagation::Stop
@@ -429,6 +438,22 @@ pub fn choose(
             region.is_active(),
         );
         redraw.queue_draw();
+    });
+    let selected_area = selected.clone();
+    let size_label = dimensions.clone();
+    let capture_button = accept.clone();
+    let redraw = canvas.clone();
+    region.connect_clicked(move |region| {
+        if selected_area.get().is_none() {
+            selected_area.set(remembered_area);
+            update_controls(
+                &size_label,
+                &capture_button,
+                remembered_area,
+                region.is_active(),
+            );
+            redraw.queue_draw();
+        }
     });
     let copy = window.clone();
     cancel.connect_clicked(move |_| copy.response(gtk::ResponseType::Cancel));
@@ -713,10 +738,8 @@ fn start_drag(area: Option<Area>, point: (f64, f64), tolerance: f64) -> Drag {
                     bottom: bottom_edge,
                 };
             }
-            return Drag::Move {
-                anchor: point,
-                original: area,
-            };
+            // A drag inside a rectangle starts a new snip from that point, just
+            // like a drag outside it. Only the visible edges resize an old area.
         }
     }
     Drag::New(point)
@@ -725,15 +748,6 @@ fn start_drag(area: Option<Area>, point: (f64, f64), tolerance: f64) -> Drag {
 fn update_drag(drag: Drag, point: (f64, f64), width: i32, height: i32) -> Option<Area> {
     match drag {
         Drag::New(start) => Area::from_points(start, point, width, height),
-        Drag::Move { anchor, original } => Some(Area {
-            x: (f64::from(original.x) + point.0 - anchor.0)
-                .round()
-                .clamp(0.0, f64::from(width - original.width)) as i32,
-            y: (f64::from(original.y) + point.1 - anchor.1)
-                .round()
-                .clamp(0.0, f64::from(height - original.height)) as i32,
-            ..original
-        }),
         Drag::Resize {
             original,
             left,
@@ -829,20 +843,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn move_and_resize_preserve_valid_desktop_bounds() {
+    fn dragging_inside_selection_starts_a_new_area_and_edges_still_resize() {
         let original = Area {
             x: 10,
             y: 10,
             width: 30,
             height: 20,
         };
-        let movement = start_drag(Some(original), (25.0, 20.0), 2.0);
+        let replacement = start_drag(Some(original), (25.0, 20.0), 2.0);
         assert_eq!(
-            update_drag(movement, (200.0, 200.0), 100, 80),
+            update_drag(replacement, (200.0, 200.0), 100, 80),
             Some(Area {
-                x: 70,
-                y: 60,
-                ..original
+                x: 25,
+                y: 20,
+                width: 75,
+                height: 60,
             })
         );
         let resize = start_drag(Some(original), (10.0, 10.0), 2.0);

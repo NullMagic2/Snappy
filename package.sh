@@ -5,7 +5,7 @@
 set -euo pipefail
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 cd -- "$project_root"
-release=27
+release=30
 case "${1:-all}" in
     all) targets='ubuntu mint debian' ;;
     ubuntu|mint|debian) targets=$1 ;;
@@ -42,6 +42,7 @@ install -Dm755 packaging/launch "$stage/usr/lib/snappy/launch"
 install -Dm644 packaging/io.github.snappy.Capture.desktop "$stage/usr/share/applications/io.github.snappy.Capture.desktop"
 install -Dm644 packaging/snappy-setup.desktop "$stage/etc/xdg/autostart/snappy-setup.desktop"
 install -Dm644 packaging/copyright "$stage/usr/share/doc/snappy-capture/copyright"
+install -Dm644 assets/ocr-models-license.txt "$stage/usr/share/doc/snappy-capture/ocr-models-license.txt"
 icon_dir=$stage/usr/share/icons/hicolor/512x512/apps
 mkdir -p "$icon_dir"
 ffmpeg -nostdin -v error -i assets/snappy.png -vf scale=512:512 -frames:v 1 "$icon_dir/io.github.snappy.Capture.png"
@@ -77,8 +78,9 @@ Priority: optional
 Architecture: amd64
 Maintainer: Snappy maintainers <snappy@localhost>
 Installed-Size: $installed_size
-Depends: libc6 (>= $glibc_required), libgcc-s1, libgtk-3-0t64 (>= 3.22), libgdk-pixbuf-2.0-0, libatk1.0-0t64, libcairo2, libglib2.0-0t64, libx11-6, ffmpeg, yaru-theme-gtk, dconf-gsettings-backend, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav, xdg-desktop-portal
+Depends: libc6 (>= $glibc_required), libgcc-s1, libgtk-3-0t64 (>= 3.22), libgdk-pixbuf-2.0-0, libatk1.0-0t64, libcairo2, libglib2.0-0t64, libx11-6, ffmpeg, curl, pkexec, yaru-theme-gtk, dconf-gsettings-backend, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav, xdg-desktop-portal
 Recommends: $portals, pipewire-pulse | pulseaudio, gstreamer1.0-plugins-bad, va-driver-all | mesa-va-drivers
+Suggests: tesseract-ocr, tesseract-ocr-eng, tesseract-ocr-spa, tesseract-ocr-ell, tesseract-ocr-por
 Description: Snappy screenshot and desktop video capture
  A GTK 3 screen capture tool with on-screen area selection, desktop audio,
  screenshot formats and video export presets. Supports X11 and Wayland.

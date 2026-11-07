@@ -232,18 +232,10 @@ pub(crate) fn run_image_command(
 }
 
 fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Capture backend did not finish in time".into());
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    files::wait_bounded(child, timeout, || false).map_err(|error| match error.kind() {
+        std::io::ErrorKind::TimedOut => "Capture backend did not finish in time".into(),
+        _ => error.to_string(),
+    })
 }
 
 fn desktop_monitor() -> String {

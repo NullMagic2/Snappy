@@ -21,3 +21,10 @@ License: MIT
  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
+
+Files: assets/ocr-models-license.txt
+Copyright: See https://github.com/tesseract-ocr/tessdata_fast
+License: Apache-2.0
+ The full license is included in ocr-models-license.txt. It accompanies optional
+ language models downloaded from the Tesseract OCR project's tessdata_fast
+ repository. Model files are not bundled in this package.
