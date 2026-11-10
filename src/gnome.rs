@@ -41,14 +41,14 @@ async fn proxy(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>> {
 }
 
 /// An installed bridge must be enabled instead of unexpectedly falling back to sharing prompts.
-pub async fn available() -> Result<bool> {
+pub async fn version() -> Result<Option<u32>> {
     if !gnome_session() {
-        return Ok(false);
+        return Ok(None);
     }
     let connection = connection().await?;
     let native = proxy(&connection).await?;
     match native.call::<_, _, u32>("Ping", &()).await {
-        Ok(1 | 2 | 3) => Ok(true),
+        Ok(version @ (1 | 2 | 3 | 4)) => Ok(Some(version)),
         Ok(_) => Err("Unsupported Snappy GNOME Shell integration version".into()),
         Err(error) if installed() => Err(format!(
             "{}: {error}",
@@ -56,7 +56,7 @@ pub async fn available() -> Result<bool> {
                 "Snappy GNOME Shell integration is not ready. Sign out and back in once after installation, then enable Snappy Capture Integration in Extensions."
             )
         )),
-        Err(_) => Ok(false),
+        Err(_) => Ok(None),
     }
 }
 
@@ -80,7 +80,7 @@ pub async fn screenshot(path: &Path, show_pointer: bool) -> Result<()> {
 /// an older integration that cannot maintain the recording controls above other windows.
 async fn require_current(native: &zbus::Proxy<'_>) -> Result<()> {
     let version: u32 = native.call("Ping", &()).await.map_err(|e| e.to_string())?;
-    if version != 3 {
+    if !matches!(version, 3 | 4) {
         return Err("GNOME is still running an older Snappy integration. Install the latest Snappy package, then sign out and back in to load it.".into());
     }
     Ok(())
@@ -88,31 +88,60 @@ async fn require_current(native: &zbus::Proxy<'_>) -> Result<()> {
 
 pub struct Stream {
     connection: zbus::Connection,
-    path: zbus::zvariant::OwnedObjectPath,
+    path: Option<zbus::zvariant::OwnedObjectPath>,
     pub node: u32,
 }
 
 impl Stream {
     pub async fn request(show_pointer: bool) -> Result<Self> {
+        Self::start(show_pointer, false).await
+    }
+
+    /// A single lossless preview frame; the caller avoids export compression.
+    pub async fn preview(show_pointer: bool) -> Result<Self> {
+        Self::start(show_pointer, true).await
+    }
+
+    async fn start(show_pointer: bool, preview: bool) -> Result<Self> {
         let connection = connection().await?;
         let native = proxy(&connection).await?;
         require_current(&native).await?;
         let (path, node) = native
-            .call("StartStreamWithPointer", &(show_pointer,))
+            .call(
+                if preview {
+                    "StartPreviewWithPointer"
+                } else {
+                    "StartStreamWithPointer"
+                },
+                &(show_pointer,),
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(Self {
             connection,
-            path,
+            path: Some(path),
             node,
         })
+    }
+
+    /// Await the preview's input-grab release before showing capture controls.
+    pub async fn close(mut self) -> Result<()> {
+        let native = proxy(&self.connection).await?;
+        if let Some(path) = self.path.as_ref() {
+            native
+                .call::<_, _, ()>("StopStream", &(path,))
+                .await
+                .map_err(|e| e.to_string())?;
+            self.path = None;
+        }
+        Ok(())
     }
 }
 
 impl Drop for Stream {
     fn drop(&mut self) {
         let connection = self.connection.clone();
-        let path = self.path.clone();
+        let Some(path) = self.path.take() else { return };
         portal::runtime().spawn(async move {
             if let Ok(proxy) = proxy(&connection).await {
                 let _ = proxy.call::<_, _, ()>("StopStream", &(path,)).await;
@@ -185,7 +214,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let image = directory.path().join("snapshot.png");
         portal::runtime().block_on(async {
-            assert!(available().await.unwrap());
+            assert!(version().await.unwrap().is_some());
             screenshot(&image, false).await.unwrap();
             assert!(
                 std::fs::read(&image)

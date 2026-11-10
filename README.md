@@ -26,9 +26,9 @@ Download **one** package for your distribution from [GitHub Releases](https://gi
 
 | **Distribution** | **Package** |
 | --- | --- |
-| Ubuntu 24.04+ | `snappy-capture_0.1.0-32ubuntu1_amd64.deb` |
-| Linux Mint 22+ | `snappy-capture_0.1.0-32mint1_amd64.deb` |
-| Debian 13+ | `snappy-capture_0.1.0-32debian1_amd64.deb` |
+| Ubuntu 24.04+ | `snappy-capture_0.1.0-34ubuntu1_amd64.deb` |
+| Linux Mint 22+ | `snappy-capture_0.1.0-34mint1_amd64.deb` |
+| Debian 13+ | `snappy-capture_0.1.0-34debian1_amd64.deb` |
 
 These packages are for **64-bit Intel/AMD (amd64)** systems. They contain the same
 application, with distribution-specific package descriptions and preferred portal
@@ -37,7 +37,7 @@ backends. They are alternative installations of the same package, not separate a
 Open a terminal in the download directory and install the matching file, for example:
 
 ```sh
-sudo apt install ./snappy-capture_0.1.0-32ubuntu1_amd64.deb
+sudo apt install ./snappy-capture_0.1.0-34ubuntu1_amd64.deb
 ```
 
 Open **Snappy** from the application menu once to complete desktop integration.
@@ -49,11 +49,36 @@ quit through **Settings → Quit Snappy**, then reopen it.
 ### Wayland and GNOME
 
 On GNOME Wayland, Snappy bundles a Shell extension for native capture without
-portal screen-sharing dialogs. GNOME may require a sign-out and sign-in when first
-discovering the extension or loading changed extension code.
+portal screen-sharing dialogs. After installing revision 34 or upgrading from an
+older revision, **save your work, sign out and sign back in once** to load Shell
+integration version 9. Restarting Snappy alone does not reload the Shell extension.
+
+You can check the loaded integration with:
+
+```sh
+gnome-extensions info snappy@snappy.local
+```
+
+It should report **Version: 9**, **Enabled: Yes** and **State: ACTIVE**. If it is
+not enabled, enable **Snappy Capture Integration** in GNOME's Extensions app.
 
 Other Wayland desktops use their capture portals and may show permission prompts.
 On X11, Snappy uses FFmpeg. Desktop sound uses the output monitor, not a microphone.
+
+### Optional OCR
+
+To enable text recognition, install Tesseract:
+
+```sh
+sudo apt update
+sudo apt install tesseract-ocr
+```
+
+Quit and reopen Snappy after installing it. Use **Settings → OCR language packs**
+to install or remove languages for your account or for all users (administrator
+approval required). Snappy's language packs are kept separate from other Tesseract
+installations. If Tesseract is absent, OCR stays disabled; screenshot and recording
+features remain available.
 
 ### Restore your shortcut or uninstall
 

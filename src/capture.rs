@@ -74,8 +74,14 @@ pub fn prepare(wayland: bool, video: bool, show_pointer: bool) -> Result<Prepare
         .tempdir()
         .map_err(|e| e.to_string())?;
     let image = scratch.path().join("preview.png");
-    let native = wayland && portal::runtime().block_on(gnome::available())?;
-    let source = if wayland && !video && (native || !show_pointer) {
+    let native_version = if wayland {
+        portal::runtime().block_on(gnome::version())?
+    } else {
+        None
+    };
+    let native = native_version.is_some();
+    let fast_preview = !video && native_version.is_some_and(|version| version >= 4);
+    let source = if wayland && !video && !fast_preview && (native || !show_pointer) {
         if native {
             portal::runtime().block_on(gnome::screenshot(&image, show_pointer))?;
         } else {
@@ -85,7 +91,9 @@ pub fn prepare(wayland: bool, video: bool, show_pointer: bool) -> Result<Prepare
         }
         Source::Screenshot
     } else if wayland {
-        let source = if native {
+        let source = if fast_preview {
+            Source::Gnome(portal::runtime().block_on(gnome::Stream::preview(show_pointer))?)
+        } else if native {
             Source::Gnome(portal::runtime().block_on(gnome::Stream::request(show_pointer))?)
         } else {
             Source::Wayland(portal::runtime().block_on(portal::Stream::request(show_pointer))?)
@@ -99,12 +107,22 @@ pub fn prepare(wayland: bool, video: bool, show_pointer: bool) -> Result<Prepare
                 "videoconvert",
                 "!",
                 "pngenc",
+                // Preview storage is temporary. Compression belongs to export, not
+                // the latency-sensitive path between Print Screen and the selector.
+                "compression-level=0",
                 "!",
                 "filesink",
             ])
             .arg(gst_property("location", &image.to_string_lossy()));
         run_image_command(command, scratch.path(), Duration::from_secs(20))?;
-        source
+        if fast_preview {
+            if let Source::Gnome(stream) = source {
+                portal::runtime().block_on(stream.close())?;
+            }
+            Source::Screenshot
+        } else {
+            source
+        }
     } else {
         let (display, width, height) = x11_geometry()?;
         let mut command = Command::new("ffmpeg");

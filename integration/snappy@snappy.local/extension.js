@@ -10,6 +10,7 @@ import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 
 const APP_ID = 'io.github.snappy.Capture';
 const PATH = '/io/github/snappy/Capture';
@@ -24,6 +25,7 @@ const XML = `<node><interface name="${IFACE}">
 <method name="ScreenshotWithPointer"><arg type="b" direction="in"/><arg type="ay" direction="out"/></method>
 <method name="StartStream"><arg type="o" direction="out"/><arg type="u" direction="out"/></method>
 <method name="StartStreamWithPointer"><arg type="b" direction="in"/><arg type="o" direction="out"/><arg type="u" direction="out"/></method>
+<method name="StartPreviewWithPointer"><arg type="b" direction="in"/><arg type="o" direction="out"/><arg type="u" direction="out"/></method>
 <method name="StopStream"><arg type="o" direction="in"/></method>
 </interface></node>`;
 
@@ -71,6 +73,8 @@ export default class SnappyIntegration extends Extension {
         // bar is therefore lifted into the group above every window layer, and
         // fullscreen unredirection stays off while it exists so it is always composited.
         // Its actor is painted on screen only, so recordings do not contain the bar.
+        // The same layer keeps capture controls above pending export dialogs; only
+        // children created for the current selector are elevated alongside it.
         // Identity and title can arrive after window-created, so they are checked
         // again whenever they change and when the window is first shown.
         this._windows = new Map();
@@ -81,6 +85,19 @@ export default class SnappyIntegration extends Extension {
         for (const actor of global.get_window_actors())
             this._watchWindow(actor.get_meta_window());
         this._lockdown = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
+        this._shortcut = new Gio.Settings({
+            schema_id: 'org.gnome.settings-daemon.plugins.media-keys.custom-keybinding',
+            path: '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snappy/',
+        });
+        this._printPressed = false;
+        this._captureMenu = null;
+        // Desktop custom shortcuts run in normal windows, but Shell popup grabs
+        // filter them out. Handle only Snappy's assigned Print key in that mode;
+        // normal shortcuts, other keys and locked sessions keep their own owners.
+        this._popupActor = null;
+        this._popupKey = 0;
+        this._popupFocus = global.stage.connect('notify::key-focus', () => this._watchPopupFocus());
+        this._watchPopupFocus();
         this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
         this._object.export(Gio.DBus.session, PATH);
         this._sessionModeSignal = Main.sessionMode.connect('updated', () => {
@@ -91,6 +108,11 @@ export default class SnappyIntegration extends Extension {
 
     disable() {
         this._enabled = false;
+        if (this._popupFocus) global.stage.disconnect(this._popupFocus);
+        this._popupFocus = 0;
+        this._unwatchPopupFocus();
+        this._shortcut = null;
+        this._captureMenu = null;
         this._animations?.clear();
         this._animations = null;
         if (this._sessionModeSignal) Main.sessionMode.disconnect(this._sessionModeSignal);
@@ -113,12 +135,84 @@ export default class SnappyIntegration extends Extension {
         this._lockdown = null;
     }
 
+    _unwatchPopupFocus() {
+        if (this._popupKey) this._popupActor.disconnect(this._popupKey);
+        if (this._popupDestroyed) this._popupActor.disconnect(this._popupDestroyed);
+        this._popupKey = 0;
+        this._popupDestroyed = 0;
+        this._popupActor = null;
+        this._printPressed = false;
+    }
+
+    _watchPopupFocus() {
+        this._unwatchPopupFocus();
+        const actor = global.stage.get_key_focus();
+        if (!actor)
+            return;
+        // A modal Shell grab routes events within its actor subtree, bypassing
+        // stage capture handlers. Follow the focused actor inside that subtree.
+        this._popupActor = actor;
+        this._popupKey = actor.connect('captured-event', (_actor, event) => this._popupCapture(event));
+        this._popupDestroyed = actor.connect('destroy', () => this._unwatchPopupFocus());
+    }
+
+    _popupCapture(event) {
+        if (event.type() !== Clutter.EventType.KEY_PRESS &&
+            event.type() !== Clutter.EventType.KEY_RELEASE)
+            return Clutter.EVENT_PROPAGATE;
+        if (event.get_key_symbol() !== Clutter.KEY_Print)
+            return Clutter.EVENT_PROPAGATE;
+        if (event.type() === Clutter.EventType.KEY_RELEASE) {
+            this._printPressed = false;
+            return Clutter.EVENT_PROPAGATE;
+        }
+        if (!(Main.actionMode & Shell.ActionMode.POPUP) ||
+            Main.sessionMode.isLocked || Main.screenShield?.locked ||
+            this._lockdown.get_boolean('disable-save-to-disk') ||
+            this._shortcut.get_string('binding') !== 'Print')
+            return Clutter.EVENT_PROPAGATE;
+        const modifiers = Clutter.ModifierType.SHIFT_MASK | Clutter.ModifierType.CONTROL_MASK |
+            Clutter.ModifierType.MOD1_MASK | Clutter.ModifierType.SUPER_MASK |
+            Clutter.ModifierType.HYPER_MASK | Clutter.ModifierType.META_MASK;
+        if (event.get_state() & modifiers)
+            return Clutter.EVENT_PROPAGATE;
+        if (this._printPressed)
+            return Clutter.EVENT_STOP;
+        this._printPressed = true;
+        try {
+            const [, argv] = GLib.shell_parse_argv(this._shortcut.get_string('command'));
+            if (GLib.path_get_basename(argv[0]) !== 'snappy' ||
+                argv.length !== 2 || argv[1] !== '--capture')
+                return Clutter.EVENT_PROPAGATE;
+            this._captureMenu = Main.panel.menuManager.activeMenu;
+            const process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE);
+            process.wait_async(null, (child, result) => {
+                try { child.wait_finish(result); }
+                catch (error) { logError(error, 'Snappy popup activation'); }
+            });
+            return Clutter.EVENT_STOP;
+        } catch (error) {
+            this._captureMenu = null;
+            logError(error, 'Snappy popup activation');
+            return Clutter.EVENT_PROPAGATE;
+        }
+    }
+
+    _releaseCaptureMenu() {
+        // Freeze the open menu into the snapshot first, then release its input
+        // grab so the GTK capture controls can receive real pointer/keyboard input.
+        const menu = this._captureMenu;
+        this._captureMenu = null;
+        if (menu?.isOpen && Main.panel.menuManager.activeMenu === menu)
+            menu.close(BoxPointer.PopupAnimation.NONE);
+    }
+
     // Track existing windows as well as new ones: Shell may enable the extension
     // while Snappy is already recording. Keep every signal scoped to this enable.
     _watchWindow(window) {
         if (!window || this._windows.has(window))
             return;
-        const record = {actor: null, wasAbove: false, signals: []};
+        const record = {actor: null, wasAbove: false, screenOnly: false, signals: []};
         this._windows.set(window, record);
         for (const name of ['shown', 'notify::title', 'notify::wm-class', 'notify::gtk-application-id'])
             record.signals.push(window.connect(name, () => this._queueRefresh()));
@@ -140,7 +234,17 @@ export default class SnappyIntegration extends Extension {
             for (const [window, record] of this._windows) {
                 const snappy = window.get_gtk_application_id() === APP_ID ||
                     window.get_wm_class() === APP_ID;
-                if (!snappy || window.get_title() !== 'Snappy recording') {
+                const recording = snappy && window.get_title() === 'Snappy recording';
+                let capture = snappy && window.get_title() === 'Snappy capture overlay';
+                // Mutter may attach an older, unparented app dialog to the newest
+                // fullscreen window. Only dialogs created after this selector are
+                // its controls; a previous save preview must stay in the normal layer.
+                for (let parent = window.get_transient_for(); snappy && !capture && parent;
+                    parent = parent.get_transient_for())
+                    capture = parent.get_title() === 'Snappy capture overlay' &&
+                        parent.get_gtk_application_id() === APP_ID &&
+                        window.get_stable_sequence() > parent.get_stable_sequence();
+                if (!recording && !capture) {
                     this._releaseWindow(window, record, true);
                     continue;
                 }
@@ -150,7 +254,12 @@ export default class SnappyIntegration extends Extension {
                 if (!record.actor) {
                     record.actor = actor;
                     record.wasAbove = window.is_above();
-                    actor.add_effect_with_name(SCREEN_ONLY, new ScreenOnly());
+                    // A pending dialog from this app can be stacked above a fullscreen
+                    // selector by Mutter. Elevate only the selector and its own children;
+                    // leave every existing export and other application's dialogs in place.
+                    record.screenOnly = recording;
+                    if (record.screenOnly)
+                        actor.add_effect_with_name(SCREEN_ONLY, new ScreenOnly());
                     global.compositor.disable_unredirect();
                 }
                 if (!window.is_above()) window.make_above();
@@ -179,7 +288,7 @@ export default class SnappyIntegration extends Extension {
         record.actor = null;
         // On unmanage Mutter owns actor destruction, including its effects.
         if (restore) {
-            actor.remove_effect_by_name(SCREEN_ONLY);
+            if (record.screenOnly) actor.remove_effect_by_name(SCREEN_ONLY);
             if (actor.get_parent() === global.top_window_group)
                 this._moveActor(actor, global.window_group);
             if (!record.wasAbove) window.unmake_above();
@@ -215,7 +324,7 @@ export default class SnappyIntegration extends Extension {
     async PingAsync(_parameters, invocation) {
         try {
             await this._authorize(invocation);
-            invocation.return_value(new GLib.Variant('(u)', [3]));
+            invocation.return_value(new GLib.Variant('(u)', [4]));
         } catch (error) { this._error(invocation, error); }
     }
 
@@ -234,17 +343,32 @@ export default class SnappyIntegration extends Extension {
                 try {
                     object.screenshot_finish(result);
                     output.close(null);
+                    this._releaseCaptureMenu();
                     invocation.return_value(new GLib.Variant('(ay)', [output.steal_as_bytes().toArray()]));
-                } catch (error) { this._error(invocation, error); }
+                } catch (error) {
+                    this._releaseCaptureMenu();
+                    this._error(invocation, error);
+                }
             });
-        } catch (error) { this._error(invocation, error); }
+        } catch (error) {
+            this._releaseCaptureMenu();
+            this._error(invocation, error);
+        }
     }
 
     StartStreamAsync(_parameters, invocation) {
         return this.StartStreamWithPointerAsync([false], invocation);
     }
 
-    async StartStreamWithPointerAsync([showPointer], invocation) {
+    StartStreamWithPointerAsync([showPointer], invocation) {
+        return this._startStream(showPointer, false, invocation);
+    }
+
+    StartPreviewWithPointerAsync([showPointer], invocation) {
+        return this._startStream(showPointer, true, invocation);
+    }
+
+    async _startStream(showPointer, preview, invocation) {
         let path;
         try {
             const sender = await this._authorize(invocation);
@@ -252,14 +376,14 @@ export default class SnappyIntegration extends Extension {
                 throw new Error('Snappy already has an active recording stream');
             [path] = await call(MUTTER, '/org/gnome/Mutter/ScreenCast', MUTTER,
                 'CreateSession', new GLib.Variant('(a{sv})', [{}]), '(o)');
-            const record = {sender, watch: 0, subscription: 0, timeout: 0};
+            const record = {sender, preview, watch: 0, subscription: 0, timeout: 0};
             this._sessions.set(path, record);
             record.watch = Gio.bus_watch_name_on_connection(Gio.DBus.session, sender,
                 Gio.BusNameWatcherFlags.NONE, null, () => this._stop(path));
             const [stream] = await call(MUTTER, path, SESSION, 'RecordArea',
                 new GLib.Variant('(iiiia{sv})', [0, 0, global.stage.width, global.stage.height, {
                     'cursor-mode': new GLib.Variant('u', showPointer ? 1 : 0),
-                    'is-recording': new GLib.Variant('b', true),
+                    'is-recording': new GLib.Variant('b', !preview),
                 }]), '(o)');
             const node = await new Promise((resolve, reject) => {
                 record.reject = reject;
@@ -311,6 +435,9 @@ export default class SnappyIntegration extends Extension {
         this._clearPending(record);
         reject?.(new Error('Native recording stream was closed'));
         if (record.watch) Gio.bus_unwatch_name(record.watch);
+        // The app stops a preview only after receiving its frame. Keep the menu
+        // visible until then, and release its grab before the selector opens.
+        if (record.preview) this._releaseCaptureMenu();
         call(MUTTER, path, SESSION, 'Stop', null, '()').catch(() => {});
     }
 }

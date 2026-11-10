@@ -296,8 +296,8 @@ impl Controller {
             return;
         }
         eprintln!("Snappy activation: preparing a new capture");
-        // Pending exports are part of the visible desktop and may be the subject
-        // of the next capture. Only the selector itself covers them temporarily.
+        // Open dialogs stay in place and may be the subject of this capture.
+        // Activation must not present an earlier screenshot or change its stacking.
         let sender = self.jobs.clone();
         let wayland = self.wayland;
         std::thread::spawn(move || {
@@ -1737,6 +1737,11 @@ fn center_dialog(dialog: &impl IsA<gtk::Window>, parent: &impl IsA<gtk::Window>)
     dialog
         .as_ref()
         .set_application(parent.as_ref().application().as_ref());
+    // An unmapped background owner has no visible placement or input relationship
+    // for this dialog; keep it independent and center it on the screen.
+    if !parent.as_ref().is_mapped() {
+        dialog.as_ref().set_transient_for(gtk::Window::NONE);
+    }
     dialog
         .as_ref()
         .set_position(if parent.as_ref().is_mapped() {

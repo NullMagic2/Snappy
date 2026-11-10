@@ -44,11 +44,16 @@ pub fn choose(
 ) -> Option<Choice> {
     let window = gtk::Dialog::with_buttons(
         Some("Snappy capture overlay"),
-        Some(parent),
+        gtk::Window::NONE,
         gtk::DialogFlags::MODAL,
         &[],
     );
+    // This fullscreen selector is independent of pending export dialogs; the
+    // background owner is used only for application identity and monitor lookup.
     window.set_application(parent.application().as_ref());
+    // Keep any modal grab from an earlier export's child dialog out of this selector.
+    let windows = gtk::WindowGroup::new();
+    windows.add_window(&window);
     window.set_decorated(false);
     // Wayland must be free to apply the compositor's fullscreen configure size.
     window.set_resizable(true);
